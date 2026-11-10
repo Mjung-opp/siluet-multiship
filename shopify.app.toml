@@ -1,0 +1,36 @@
+# Siluet Multiship. Learn more at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "4e7f338ebf90dd944077cc05840c9f3f"
+name = "siluet-multiship"
+application_url = "https://example.com"
+embedded = true
+
+[access_scopes]
+scopes = "read_products,write_draft_orders,read_orders,write_app_proxy,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders"
+
+[app_proxy]
+url = "https://example.com/proxy"
+prefix = "apps"
+subpath = "multiship"
+
+[webhooks]
+api_version = "2026-07"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/paid"
+  topics = [ "orders/paid" ]
+
+[auth]
+redirect_urls = [ "https://example.com/api/auth" ]
+
+[build]
+include_config_on_deploy = true
+automatically_update_urls_on_dev = true

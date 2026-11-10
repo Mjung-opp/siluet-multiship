@@ -1,0 +1,45 @@
+{%- comment -%} Siluet: send one order to several addresses. Cart page block. {%- endcomment -%}
+<div
+  class="siluet-ms"
+  data-siluet-ms
+  data-root="{{ routes.root_url }}"
+  data-currency="{{ cart.currency.iso_code }}"
+  data-email="{{ customer.email | escape }}"
+  style="--ms-ink: {{ block.settings.ink }}; --ms-bg: {{ block.settings.background }};"
+>
+  <button type="button" class="siluet-ms__toggle" data-ms-toggle aria-expanded="false">
+    <span>{{ block.settings.toggle_label }}</span>
+    <span class="siluet-ms__chev" aria-hidden="true">+</span>
+  </button>
+
+  <div class="siluet-ms__panel" data-ms-panel hidden>
+    <p class="siluet-ms__intro">{{ block.settings.intro }}</p>
+    <div data-ms-recipients></div>
+    <p class="siluet-ms__left" data-ms-left aria-live="polite"></p>
+    <button type="button" class="siluet-ms__link" data-ms-add>+ Add another address</button>
+    <button type="button" class="siluet-ms__btn" data-ms-quote disabled>See shipping prices</button>
+    <div data-ms-summary aria-live="polite"></div>
+    <p class="siluet-ms__error" data-ms-error role="alert" hidden></p>
+  </div>
+
+  <script type="application/json" data-ms-countries>
+    [{%- for c in localization.available_countries -%}{"code":{{ c.iso_code | json }},"name":{{ c.name | json }}}{%- unless forloop.last -%},{%- endunless -%}{%- endfor -%}]
+  </script>
+</div>
+
+{{ 'multiship.css' | asset_url | stylesheet_tag }}
+<script src="{{ 'multiship.js' | asset_url }}" defer></script>
+
+{% schema %}
+{
+  "name": "Ship to many addresses",
+  "target": "section",
+  "enabled_on": { "templates": ["cart"] },
+  "settings": [
+    { "type": "text", "id": "toggle_label", "label": "Button text", "default": "Send to more than one address" },
+    { "type": "textarea", "id": "intro", "label": "Intro", "default": "Gifting? Split your order between addresses. The address with the most pieces ships free." },
+    { "type": "color", "id": "ink", "label": "Text and buttons", "default": "#1c2841" },
+    { "type": "color", "id": "background", "label": "Background", "default": "#faf8f4" }
+  ]
+}
+{% endschema %}
