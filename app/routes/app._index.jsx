@@ -4,7 +4,34 @@ import { useState } from "react";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { getSettings, pickupDay } from "../multiship/settings.server.js";
-import { listOpenOrders, createLabelBatch } from "../multiship/shipments.server.js";
+import { listOpenOrders, createLabelBatch, planForOrder } from "../multiship/shipments.server.js";
+
+// Until DHL production access is live, real stores book by hand in MyDHL. Test labels stay on the dev store only.
+const DEV_STORE = "siluet-multiship-test.myshopify.com";
+const isLocked = (settings, shop) => settings.dhl.env !== "live" && shop !== DEV_STORE;
+
+async function manualDetails(shop, order) {
+  try {
+    const plan = await planForOrder(shop, order);
+    return plan.recipients.map((r, i) => {
+      const a = r.address;
+      const q = plan.quotes[r.id];
+      const ddp = plan.ddpChoices?.[r.id] && q.ddp?.available;
+      return {
+        letter: plan.recipients.length > 1 ? String.fromCharCode(65 + i) : "",
+        free: plan.quote?.freeRecipientId === r.id && plan.recipients.length > 1,
+        lines: [a.name, a.company, a.address1, a.address2, [a.zip, a.city, a.provinceCode].filter(Boolean).join(" "), a.countryCode].filter(Boolean),
+        phone: a.phone || "",
+        items: r.lines.map((l) => `${l.quantity} x ${l.title || l.sku}`),
+        parcels: q.internal.parcels.map((p) => `${p.length} x ${p.width} x ${p.height} cm, ${p.weight} kg`),
+        service: q.internal.productCode === "N" ? "Domestic Express" : "Express Worldwide",
+        duties: ddp ? "DDP (customer prepaid duties)" : "DAP",
+      };
+    });
+  } catch (e) {
+    return [{ error: e.message }];
+  }
+}
 
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
@@ -16,9 +43,12 @@ export const loader = async ({ request }) => {
   const pickup = await db.pickupBooking.findUnique({ where: { shop_date: { shop, date: day } } });
   const batches = await db.labelBatch.findMany({ where: { shop }, orderBy: { createdAt: "desc" }, take: 5, select: { id: true, createdAt: true, summary: true, pickup: true, pdf: false } });
   const missingSender = !settings.sender.phone || !settings.sender.contactName;
+  const locked = isLocked(settings, shop);
+  const manual = locked ? Object.fromEntries(await Promise.all(orders.map(async (o) => [o.legacyResourceId, await manualDetails(shop, o)]))) : {};
 
   return {
     env: settings.dhl.env,
+    locked,
     missingSender,
     day,
     pickup: pickup ? { confirmation: pickup.confirmation, error: pickup.error } : null,
@@ -37,6 +67,7 @@ export const loader = async ({ request }) => {
         duties: Number(o.currentTotalDutiesSet?.shopMoney?.amount || 0) > 0,
         shipTo,
         pieces: o.lineItems.nodes.filter((l) => l.requiresShipping).reduce((n, l) => n + l.quantity, 0),
+        manual: manual[o.legacyResourceId] || null,
         labels: mine.filter((s) => s.trackingNumber).map((s) => ({ letter: s.letter, tracking: s.trackingNumber, error: s.error })),
       };
     }),
@@ -49,6 +80,7 @@ export const action = async ({ request }) => {
   const orderIds = form.getAll("order").map(String);
   if (!orderIds.length) return { error: "Select at least one order." };
   const settings = await getSettings(session.shop);
+  if (isLocked(settings, session.shop)) return { error: "Labels are switched off until DHL production access is live. Book these in MyDHL for now." };
   if (!settings.sender.phone) return { error: "Add your sender phone in Settings first. DHL needs it on every label." };
   return createLabelBatch({ admin, shop: session.shop, settings, orderIds });
 };
@@ -69,7 +101,7 @@ function PdfButton({ batchId, children }) {
 }
 
 export default function Orders() {
-  const { orders, env, day, pickup, batches, missingSender } = useLoaderData();
+  const { orders, env, locked, day, pickup, batches, missingSender } = useLoaderData();
   const fetcher = useFetcher();
   const [picked, setPicked] = useState({});
   const busy = fetcher.state !== "idle";
@@ -80,16 +112,18 @@ export default function Orders() {
 
   return (
     <s-page heading="Orders to ship">
-      {env !== "live" && <s-banner tone="warning" heading="DHL test mode">Labels are DHL sandbox labels and cannot be used to ship.</s-banner>}
+      {locked
+        ? <s-banner tone="warning" heading="Book in MyDHL for now">DHL production access is not live yet, so labels are switched off. Each order below shows what to enter in MyDHL.</s-banner>
+        : env !== "live" && <s-banner tone="warning" heading="DHL test mode">Labels are DHL sandbox labels and cannot be used to ship.</s-banner>}
       {missingSender && <s-banner tone="critical" heading="Sender details missing">Add your phone and contact name in Settings before printing labels.</s-banner>}
 
-      <s-section heading={`Pickup for ${day}`}>
+      {!locked && <s-section heading={`Pickup for ${day}`}>
         {pickup?.confirmation
           ? <s-paragraph>Booked with DHL. Confirmation {pickup.confirmation}.</s-paragraph>
           : pickup?.error
             ? <s-paragraph tone="critical">Pickup could not be booked: {pickup.error}</s-paragraph>
             : <s-paragraph>Not booked yet. It is booked automatically with the first labels of the day.</s-paragraph>}
-      </s-section>
+      </s-section>}
 
       {result && (
         <s-section heading="Last batch">
@@ -119,15 +153,25 @@ export default function Orders() {
                     <strong>{o.name}</strong> · {o.when} · {o.pieces} piece{o.pieces === 1 ? "" : "s"} · {o.multi ? `${o.shipTo.length} addresses` : "1 address"}{o.duties ? " · duties paid (DDP)" : ""}
                     <br />
                     {o.shipTo.join(" · ")}
+                    {o.manual?.map((m, i) => m.error
+                      ? <span key={i}><br /><em>{m.error}</em></span>
+                      : (
+                        <span key={i} style={{ display: "block", marginTop: 8, paddingLeft: 8, borderLeft: "2px solid #ccc" }}>
+                          <strong>{m.letter ? `Shipment ${m.letter}` : "Shipment"}{m.free ? " (free shipping)" : ""}</strong> · {m.service} · {m.duties}<br />
+                          {m.lines.join(", ")}{m.phone ? ` · ${m.phone}` : ""}<br />
+                          {m.items.join(", ")}<br />
+                          {m.parcels.map((p, j) => <span key={j}>Parcel {j + 1}: {p}<br /></span>)}
+                        </span>
+                      ))}
                     {o.labels.map((l) => <span key={l.tracking}><br />Label {l.letter !== "-" ? l.letter : ""} DHL {l.tracking}{l.error ? ` · ${l.error}` : ""}</span>)}
                   </span>
                 </label>
               </s-box>
             ))}
             {orders.length === 0 && <s-paragraph>Nothing waiting. Lovely.</s-paragraph>}
-            <s-button type="submit" variant="primary" loading={busy || undefined} disabled={!Object.values(picked).some(Boolean) || undefined}>
+            {!locked && <s-button type="submit" variant="primary" loading={busy || undefined} disabled={!Object.values(picked).some(Boolean) || undefined}>
               Create labels for selected
-            </s-button>
+            </s-button>}
           </s-stack>
         </fetcher.Form>
       </s-section>
