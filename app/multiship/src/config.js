@@ -55,7 +55,7 @@ export const PRICING = {
 export function itemKeyFromSku(sku) {
   const s = String(sku || '').toUpperCase().trim();
   let m;
-  if ((m = s.match(/^([SML])(MB|SL|GD)-/))) return `CS-${m[1]}`;
+  if ((m = s.match(/^([SML])(MB|SL|GD)-?/))) return `CS-${m[1]}`;
   if ((m = s.match(/^CS-([SML])-/))) return `CS-${m[1]}`;
   if (/^GP[A-Z]{3}\d{4}/.test(s) || s.startsWith('GP-')) return 'GP';
   if (s.startsWith('LB')) throw new UnsupportedItemError('City Lights is not available for multi address shipping yet');
