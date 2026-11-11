@@ -97,7 +97,7 @@ export const action = async ({ request }) => {
     const out = data.draftOrderCreate;
     if (out.userErrors?.length) {
       console.error("[multiship] draft errors", JSON.stringify(out.userErrors));
-      return Response.json({ error: "We could not start checkout. Please try again." }, { status: 500 });
+      return Response.json({ error: "We could not start checkout. Please try again." }, { status: 200 });
     }
 
     await db.multishipCheckout.update({
@@ -107,9 +107,9 @@ export const action = async ({ request }) => {
 
     return Response.json({ url: out.draftOrder.invoiceUrl });
   } catch (e) {
-    if (e instanceof InputError) return Response.json({ error: e.message }, { status: 400 });
+    if (e instanceof InputError) return Response.json({ error: e.message }, { status: 200 });
     console.error("[multiship] checkout failed", e.message, e.dhl ? JSON.stringify(e.dhl) : "");
-    return Response.json({ error: "We could not reach DHL right now. Please try again in a moment." }, { status: 502 });
+    return Response.json({ error: "We could not get a DHL price for one of these addresses. Please check them, or try again in a moment." }, { status: 200 });
   }
 };
 

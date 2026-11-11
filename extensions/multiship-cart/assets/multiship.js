@@ -154,7 +154,7 @@
     try {
       const res = await fetch(`${proxy}/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload()) });
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json.error || 'Something went wrong. Please try again.');
+      if (!res.ok || json.error) throw new Error(json.error || 'Something went wrong. Please try again.');
       return json;
     } catch (e) {
       err.textContent = e.message;

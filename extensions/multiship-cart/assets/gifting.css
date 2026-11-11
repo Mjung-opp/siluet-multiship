@@ -1,0 +1,114 @@
+/* Siluet gifting. Mobile first. Inherits the theme's fonts. */
+.sms-flow {
+  --ink: var(--siluet-ms-ink, #172640);
+  --bg: var(--siluet-ms-bg, #fff);
+  --soft: var(--siluet-ms-accent, #f5f4f4);
+  --line: color-mix(in srgb, var(--ink) 14%, transparent);
+  --muted: color-mix(in srgb, var(--ink) 62%, transparent);
+  color: var(--ink);
+  background: var(--bg);
+  font-family: var(--text-font-family, inherit);
+  font-size: 15px;
+  line-height: 1.45;
+}
+.sms-flow *, .sms-flow *::before, .sms-flow *::after { box-sizing: border-box; }
+.sms-flow button { font: inherit; color: inherit; }
+
+/* Head */
+.sms-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; padding: 20px 20px 12px; }
+.sms-title { margin: 0; font-family: var(--heading-font-family, inherit); font-style: var(--heading-font-style, normal); font-weight: var(--heading-font-weight, 700); font-size: 22px; line-height: 1.2; letter-spacing: 0; text-transform: none; color: var(--ink); }
+.sms-intro { margin: 6px 0 0; color: var(--muted); }
+.sms-icon { flex: none; width: 44px; height: 44px; margin: -10px -10px 0 0; border: 0; background: none; cursor: pointer; font-size: 16px; display: grid; place-items: center; }
+
+/* People */
+.sms-body { padding: 4px 20px 20px; }
+.sms-person { border: 1px solid var(--line); background: var(--bg); margin: 0 0 12px; }
+.sms-person__head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--soft); }
+.sms-person__num { flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--ink); color: var(--bg); display: grid; place-items: center; font-size: 13px; font-weight: 600; }
+.sms-person__name { flex: 1; min-width: 0; min-height: 40px; border: 0; border-bottom: 1px solid transparent; background: transparent; font: inherit; font-size: 16px; font-weight: 600; color: inherit; padding: 4px 0; outline: none; }
+.sms-person__name::placeholder { color: var(--muted); font-weight: 400; }
+.sms-person__name:focus { border-bottom-color: var(--ink); }
+.sms-person .sms-icon { margin: -6px -6px -6px 0; }
+
+.sms-pieces { padding: 4px 12px; }
+.sms-piece { display: flex; align-items: center; gap: 12px; padding: 8px 0; opacity: .55; transition: opacity .15s; }
+.sms-piece.is-on { opacity: 1; }
+.sms-piece + .sms-piece { border-top: 1px solid var(--line); }
+.sms-piece img, .sms-piece__ph { flex: none; width: 48px; height: 48px; object-fit: cover; background: var(--soft); }
+.sms-piece__text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sms-piece__text span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sms-piece__text small { color: var(--muted); font-size: 13px; }
+.sms-stepper { flex: none; display: inline-flex; align-items: center; border: 1px solid var(--line); }
+.sms-stepper button { width: 40px; height: 40px; border: 0; background: none; cursor: pointer; font-size: 18px; }
+.sms-stepper button:disabled { opacity: .25; cursor: default; }
+.sms-stepper output { min-width: 24px; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
+.sms-hint { margin: 0; padding: 0 12px 12px; color: var(--muted); font-size: 14px; }
+
+/* Address */
+.sms-address { border-top: 1px solid var(--line); }
+.sms-address summary { list-style: none; display: flex; justify-content: space-between; gap: 12px; padding: 12px; cursor: pointer; font-weight: 600; min-height: 44px; }
+.sms-address summary::-webkit-details-marker { display: none; }
+.sms-address[open] summary .sms-link { display: none; }
+.sms-address summary > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sms-fields { display: flex; flex-wrap: wrap; gap: 0 10px; padding: 0 12px 4px; }
+.sms-field { width: 100%; margin: 0 0 10px; font-size: 13px; color: var(--muted); }
+.sms-field--half { width: calc(50% - 5px); }
+.sms-field span { display: block; margin-bottom: 4px; }
+.sms-field em { font-style: normal; opacity: .75; }
+.sms-field input, .sms-field select { width: 100%; min-height: 44px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 0; background: var(--bg); color: var(--ink); font: inherit; font-size: 16px; }
+.sms-field input:focus, .sms-field select:focus { outline: 2px solid var(--ink); outline-offset: -1px; }
+
+/* Prices */
+.sms-rate { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 12px; border-top: 1px solid var(--line); }
+.sms-rate.is-free strong { color: var(--ink); }
+.sms-ddp { display: grid; grid-template-columns: 20px 1fr auto; gap: 10px; align-items: start; padding: 0 12px 12px; font-size: 14px; cursor: pointer; }
+.sms-ddp input { width: 20px; height: 20px; margin: 1px 0 0; accent-color: var(--ink); }
+.sms-ddp strong { white-space: nowrap; }
+
+.sms-add { width: 100%; min-height: 48px; border: 1px dashed color-mix(in srgb, var(--ink) 40%, transparent); background: none; cursor: pointer; font-weight: 600; }
+.sms-note { margin: 14px 0 0; color: var(--muted); font-size: 13px; text-align: center; }
+.sms-link { background: none; border: 0; padding: 0; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; font-weight: 400; }
+
+/* Footer */
+.sms-foot { padding: 14px 20px calc(14px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--bg); }
+.sms-status { margin: 0 0 10px; color: var(--muted); font-size: 14px; min-height: 20px; }
+.sms-status.is-error { color: #a4161a; }
+.sms-status--total { display: flex; justify-content: space-between; color: var(--ink); font-size: 16px; }
+.sms-btn { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 52px; padding: 0 20px; border: 0; background: var(--ink); color: var(--bg) !important; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; font-size: 13px; text-decoration: none; cursor: pointer; }
+.sms-btn:disabled { opacity: .35; cursor: default; }
+.sms-retry { display: block; margin: 10px auto 0; }
+.sms-loading { padding: 40px 20px; text-align: center; color: var(--muted); }
+.sms-empty { padding: 8px 20px 24px; }
+.sms-empty p { margin: 0 0 8px; }
+.sms-empty .sms-btn { margin-top: 16px; }
+
+/* Sheet: bottom sheet on phones, side panel on larger screens */
+html.sms-lock { overflow: hidden; }
+.sms-sheet { padding: 0; border: 0; margin: 0; max-width: none; max-height: none; width: 100%; height: 100%; background: transparent; }
+.sms-sheet::backdrop { background: rgba(23, 38, 64, .45); }
+.sms-sheet__panel { position: absolute; left: 0; right: 0; bottom: 0; top: 24px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 -8px 30px rgba(0,0,0,.12); animation: sms-up .28s ease-out; }
+.sms-sheet__panel .sms-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+@keyframes sms-up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes sms-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (min-width: 750px) {
+  .sms-sheet__panel { top: 0; left: auto; width: 480px; box-shadow: -8px 0 30px rgba(0,0,0,.12); animation-name: sms-in; }
+  .sms-head { padding: 28px 28px 12px; }
+  .sms-body { padding: 4px 28px 24px; }
+  .sms-foot { padding: 16px 28px 20px; }
+}
+@media (prefers-reduced-motion: reduce) { .sms-sheet__panel { animation: none; } }
+
+/* Inline (Gifting page) */
+.sms-flow--inline { max-width: 640px; margin: 0 auto; border: 1px solid var(--line); }
+.sms-flow--inline .sms-foot { position: sticky; bottom: 0; }
+
+/* Theme choice: One address / Several people */
+.siluet-ship-choice { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); margin: 0 0 12px; padding: 0; min-width: 0; }
+.siluet-ship-choice legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.siluet-ship-choice label { position: relative; display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px; padding: 6px 10px; cursor: pointer; font-size: 13px; letter-spacing: .04em; text-align: center; line-height: 1.2; }
+.siluet-ship-choice label + label { border-left: 1px solid color-mix(in srgb, currentColor 22%, transparent); }
+.siluet-ship-choice input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.siluet-ship-choice label:has(input:checked) { background: var(--siluet-ms-ink, #172640); color: #fff; }
+.siluet-ship-choice label:has(input:focus-visible) { outline: 2px solid currentColor; outline-offset: 2px; }
+.siluet-ship-choice__hint { grid-column: 1 / -1; margin: 0; padding: 8px 10px; font-size: 13px; border-top: 1px solid color-mix(in srgb, currentColor 22%, transparent); display: none; }
+.siluet-ship-choice.is-several .siluet-ship-choice__hint { display: block; }

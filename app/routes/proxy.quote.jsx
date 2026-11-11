@@ -12,9 +12,9 @@ export const action = async ({ request }) => {
     const { result } = await quote(admin, parsed, await getSettings(session.shop));
     return Response.json(publicQuote(result));
   } catch (e) {
-    if (e instanceof InputError) return Response.json({ error: e.message }, { status: 400 });
+    if (e instanceof InputError) return Response.json({ error: e.message }, { status: 200 });
     console.error("[multiship] quote failed", e.message, e.dhl ? JSON.stringify(e.dhl) : "");
-    return Response.json({ error: "We could not reach DHL right now. Please try again in a moment." }, { status: 502 });
+    return Response.json({ error: "We could not get a DHL price for one of these addresses. Please check them, or try again in a moment." }, { status: 200 });
   }
 };
 

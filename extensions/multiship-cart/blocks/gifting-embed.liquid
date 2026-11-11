@@ -1,0 +1,41 @@
+{%- comment -%}
+  Siluet gifting: loads the "send to several people" flow on every page.
+  Theme triggers: [data-siluet-ship-choice] radios, or window.SiluetGifting.open().
+{%- endcomment -%}
+<script type="application/json" id="siluet-ms-config">
+  {
+    "root": {{ routes.root_url | json }},
+    "cartUrl": {{ routes.cart_url | json }},
+    "shopUrl": {{ block.settings.shop_url | default: '/collections/shop' | json }},
+    "currency": {{ cart.currency.iso_code | json }},
+    "country": {{ localization.country.iso_code | json }},
+    "email": {{ customer.email | json }},
+    "title": {{ block.settings.title | json }},
+    "intro": {{ block.settings.intro | json }},
+    "countries": [{%- for c in localization.available_countries -%}{"code":{{ c.iso_code | json }},"name":{{ c.name | json }}}{%- unless forloop.last -%},{%- endunless -%}{%- endfor -%}]
+  }
+</script>
+<style>
+  :root {
+    --siluet-ms-ink: {{ block.settings.ink }};
+    --siluet-ms-bg: {{ block.settings.background }};
+    --siluet-ms-accent: {{ block.settings.accent }};
+  }
+</style>
+{{ 'gifting.css' | asset_url | stylesheet_tag }}
+<script src="{{ 'gifting.js' | asset_url }}" defer></script>
+
+{% schema %}
+{
+  "name": "Siluet gifting",
+  "target": "body",
+  "settings": [
+    { "type": "text", "id": "title", "label": "Title", "default": "Send to several people" },
+    { "type": "textarea", "id": "intro", "label": "Intro", "default": "Choose who gets what. Each person gets their own parcel and tracking." },
+    { "type": "url", "id": "shop_url", "label": "Link when the bag is empty" },
+    { "type": "color", "id": "ink", "label": "Text and buttons", "default": "#172640" },
+    { "type": "color", "id": "background", "label": "Background", "default": "#ffffff" },
+    { "type": "color", "id": "accent", "label": "Soft background", "default": "#f5f4f4" }
+  ]
+}
+{% endschema %}
