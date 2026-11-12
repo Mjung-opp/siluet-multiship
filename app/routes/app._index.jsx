@@ -3,12 +3,13 @@ import { useLoaderData, useFetcher } from "react-router";
 import { useState } from "react";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { getSettings, pickupDay } from "../multiship/settings.server.js";
+import { getSettings, pickupDay, dhlFor } from "../multiship/settings.server.js";
 import { listOpenOrders, createLabelBatch, planForOrder } from "../multiship/shipments.server.js";
 
-// Until DHL production access is live, real stores book by hand in MyDHL. Test labels stay on the dev store only.
+// Real labels stay off until DHL has certified our shipments (Render env DHL_SHIPMENTS_CERTIFIED=1) and Mode is Live.
+// Until then orders are booked by hand in MyDHL. Test labels stay on the dev store only.
 const DEV_STORE = "siluet-multiship-test.myshopify.com";
-const isLocked = (settings, shop) => settings.dhl.env !== "live" && shop !== DEV_STORE;
+const isLocked = (settings, shop) => shop !== DEV_STORE && (settings.dhl.env !== "live" || process.env.DHL_SHIPMENTS_CERTIFIED !== "1");
 
 async function manualDetails(shop, order) {
   try {
@@ -77,6 +78,21 @@ export const loader = async ({ request }) => {
 export const action = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   const form = await request.formData();
+  if (form.get("intent") === "cancelPickup") {
+    const settings = await getSettings(session.shop);
+    const day = pickupDay();
+    const row = await db.pickupBooking.findUnique({ where: { shop_date: { shop: session.shop, date: day } } });
+    if (!row?.confirmation) return { error: "No pickup booked for that day." };
+    try {
+      for (const c of row.confirmation.split(",").map((x) => x.trim()).filter(Boolean)) {
+        await dhlFor(settings).cancelPickup(c, settings.sender.contactName || settings.sender.companyName || "Siluet");
+      }
+      await db.pickupBooking.delete({ where: { id: row.id } });
+      return { cancelled: `Pickup ${row.confirmation} cancelled.` };
+    } catch (e) {
+      return { error: e.message };
+    }
+  }
   const orderIds = form.getAll("order").map(String);
   if (!orderIds.length) return { error: "Select at least one order." };
   const settings = await getSettings(session.shop);
@@ -113,13 +129,19 @@ export default function Orders() {
   return (
     <s-page heading="Orders to ship">
       {locked
-        ? <s-banner tone="warning" heading="Book in MyDHL for now">DHL production access is not live yet, so labels are switched off. Each order below shows what to enter in MyDHL.</s-banner>
+        ? <s-banner tone="warning" heading="Book in MyDHL for now">Labels are switched off until DHL certifies our shipments. Each order below shows what to enter in MyDHL.</s-banner>
         : env !== "live" && <s-banner tone="warning" heading="DHL test mode">Labels are DHL sandbox labels and cannot be used to ship.</s-banner>}
       {missingSender && <s-banner tone="critical" heading="Sender details missing">Add your phone and contact name in Settings before printing labels.</s-banner>}
 
-      {!locked && <s-section heading={`Pickup for ${day}`}>
+      {(!locked || pickup?.confirmation) && <s-section heading={`Pickup for ${day}`}>
         {pickup?.confirmation
-          ? <s-paragraph>Booked with DHL. Confirmation {pickup.confirmation}.</s-paragraph>
+          ? <s-stack gap="small-200">
+              <s-paragraph>Booked with DHL. Confirmation {pickup.confirmation}.</s-paragraph>
+              <fetcher.Form method="post">
+                <input type="hidden" name="intent" value="cancelPickup" />
+                <s-button type="submit" variant="secondary" tone="critical" loading={busy || undefined}>Cancel this pickup</s-button>
+              </fetcher.Form>
+            </s-stack>
           : pickup?.error
             ? <s-paragraph tone="critical">Pickup could not be booked: {pickup.error}</s-paragraph>
             : <s-paragraph>Not booked yet. It is booked automatically with the first labels of the day.</s-paragraph>}
@@ -128,6 +150,7 @@ export default function Orders() {
       {result && (
         <s-section heading="Last batch">
           {result.error && <s-paragraph tone="critical">{result.error}</s-paragraph>}
+          {result.cancelled && <s-paragraph>{result.cancelled}</s-paragraph>}
           {result.summary?.map((s, i) => (
             <s-paragraph key={i}>
               {s.order}{s.letter ? `-${s.letter}` : ""} {s.name ? `· ${s.name}` : ""}: {s.tracking ? `DHL ${s.tracking}${s.already ? " (already labelled)" : ""}` : s.error}

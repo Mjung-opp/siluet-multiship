@@ -126,6 +126,19 @@ export function createDhlClient({ apiKey, apiSecret, accountNumber, env = 'test'
     return post('/pickups', body);
   }
 
+  /** Cancel a booked pickup (DELETE /pickups/{confirmation}). */
+  async function cancelPickup(confirmation, requestorName, reason = 'not needed') {
+    const q = new URLSearchParams({ requestorName, reason });
+    const res = await fetchImpl(`${base}/pickups/${encodeURIComponent(confirmation)}?${q}`, { method: 'DELETE', headers: { Authorization: auth, Accept: 'application/json' } });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      const err = new Error(`DHL cancel pickup ${res.status}: ${json.detail || json.title || 'request failed'}`);
+      err.dhl = json;
+      throw err;
+    }
+    return true;
+  }
+
   /** All checkpoints for one shipment (GET /tracking). */
   async function track(trackingNumber) {
     const q = new URLSearchParams({ shipmentTrackingNumber: trackingNumber, trackingView: 'all-checkpoints', levelOfDetail: 'all' });
@@ -139,7 +152,7 @@ export function createDhlClient({ apiKey, apiSecret, accountNumber, env = 'test'
     return json;
   }
 
-  return { rate, dutiesAndTaxes, createShipment, createPickup, track };
+  return { rate, dutiesAndTaxes, createShipment, createPickup, cancelPickup, track };
 }
 
 // BILLC = billing currency of the DHL account. Fall back to the first price.
