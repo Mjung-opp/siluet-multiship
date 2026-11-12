@@ -280,7 +280,7 @@ async function closeNonShippingLines(admin, orderGid) {
 
 // ---------- Pickup ----------
 
-async function ensurePickup(shop, settings, day, plans) {
+export async function ensurePickup(shop, settings, day, plans) {
   const existing = await db.pickupBooking.findUnique({ where: { shop_date: { shop, date: day } } });
   if (existing?.confirmation) return existing;
   const p = plans[0];
@@ -292,7 +292,8 @@ async function ensurePickup(shop, settings, day, plans) {
     locationType: "business",
     accounts: [{ typeCode: "shipper", number: settings.dhl.accountNumber }],
     ...(settings.pickup.instructions ? { specialInstructions: [{ value: settings.pickup.instructions, typeCode: "TBD" }] } : {}),
-    customerDetails: { shipperDetails: shipper(settings) },
+    // Pickups take the address and contact only (typeCode is for shipments).
+    customerDetails: { shipperDetails: (({ typeCode, ...rest }) => rest)(shipper(settings)) },
     shipmentDetails: [{
       productCode: q.internal.productCode,
       isCustomsDeclarable: q.internal.productCode !== "N",
