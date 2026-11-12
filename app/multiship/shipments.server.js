@@ -103,6 +103,16 @@ function shipper(settings) {
   };
 }
 
+// DHL only accepts the emirate as the city for UAE addresses ("Dubai", not "Business Bay" or a PO box number).
+const EMIRATES = { AZ: "Abu Dhabi", AJ: "Ajman", DU: "Dubai", FU: "Fujairah", RK: "Ras Al Khaimah", SH: "Sharjah", UQ: "Umm Al Quwain" };
+export function uaeCity(a) {
+  if (EMIRATES[a.provinceCode]) return EMIRATES[a.provinceCode];
+  const text = `${a.city || ""} ${a.address2 || ""} ${a.address1 || ""}`.toLowerCase().replace(/[^a-z ]/g, " ");
+  const hit = Object.values(EMIRATES).find((e) => text.includes(e.toLowerCase())) || (/\brak\b/.test(text) ? "Ras Al Khaimah" : null);
+  if (!hit) throw new Error(`UAE address needs its emirate (Dubai, Abu Dhabi, Sharjah...). The city says "${a.city}". Fix the shipping address in Shopify, then try again.`);
+  return hit;
+}
+
 export function buildShipmentRequest({ settings, orderName, plan, recipient, letter, day }) {
   const quote = plan.quotes[recipient.id];
   const a = recipient.address;
@@ -130,11 +140,17 @@ export function buildShipmentRequest({ settings, orderName, plan, recipient, let
     customerDetails: {
       shipperDetails: shipper(settings),
       receiverDetails: {
-        postalAddress: {
-          postalCode: a.zip || "", cityName: a.city, countryCode: a.countryCode,
-          ...(a.provinceCode ? { provinceCode: a.provinceCode } : {}),
-          addressLine1: a.address1, ...(a.address2 ? { addressLine2: a.address2 } : {}),
-        },
+        postalAddress: a.countryCode === "AE"
+          ? (() => {
+              const city = uaeCity(a);
+              const extra = [a.address2, a.city && a.city.toLowerCase() !== city.toLowerCase() ? a.city : ""].filter(Boolean).join(", ");
+              return { postalCode: "", cityName: city, countryCode: "AE", addressLine1: a.address1, ...(extra ? { addressLine2: extra.slice(0, 45) } : {}) };
+            })()
+          : {
+              postalCode: a.zip || "", cityName: a.city, countryCode: a.countryCode,
+              ...(a.provinceCode ? { provinceCode: a.provinceCode } : {}),
+              addressLine1: a.address1, ...(a.address2 ? { addressLine2: a.address2 } : {}),
+            },
         contactInformation: { fullName: a.name, companyName: a.name, phone: a.phone || settings.sender.phone },
         typeCode: "private",
       },
