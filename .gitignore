@@ -35,3 +35,5 @@ _removed/
 .cursor/
 .gemini/
 _hs/
+_cert/
+cert.mjs

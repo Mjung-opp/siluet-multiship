@@ -40,6 +40,20 @@ export const DHL_PRODUCTS = {
 };
 
 export const DDP_SERVICE_CODE = 'DD'; // Duties and taxes paid by shipper
+export const DAP_SERVICE_CODE = 'DS'; // Duties and taxes paid by receiver (DHL certification: always send DD or DS)
+
+// Paperless Trade (WY): DHL PLT list, 12 Nov 2026. Countries NOT accepting PLT inbound need a printed invoice.
+export const PLT_NOT_ACCEPTED = new Set('AM,AZ,BN,BO,BR,BY,CR,CU,DZ,EC,EG,GE,GL,GT,HN,IN,IQ,IR,KG,KH,KP,KV,KZ,LB,LS,LY,MA,MD,MK,MM,NG,NI,PK,RU,SD,SM,SO,SS,SV,SY,TJ,TN,TR,UA,UZ,VN,XS,YE'.split(','));
+// Highest declared value DHL accepts with PLT, in USD (QAR, JOD and KWD limits converted).
+export const PLT_MAX_USD = { CO: 2000, VE: 2000, BZ: 499, MS: 1500, JM: 3000, BM: 500, TT: 1000, AR: 1000, BS: 1000, DO: 3000, GY: 200, QA: 1370, XB: 100, XC: 49999, TC: 1000, SR: 50, UY: 200, XE: 100, OM: 2590, AE: 13623, AG: 4500, BH: 1300, JO: 1410, KY: 499999, KW: 325, HT: 100, PY: 1000, MQ: 25 };
+export function pltAllowed(countryCode, valueUsd) {
+  if (PLT_NOT_ACCEPTED.has(countryCode)) return false;
+  const max = PLT_MAX_USD[countryCode];
+  return !(max && valueUsd > max);
+}
+
+// EU customs reform (1 Nov 2026): B2C imports into the EU27 need product identifiers per line item.
+export const EU27 = new Set('AT,BE,BG,HR,CY,CZ,DK,EE,FI,FR,DE,GR,HU,IE,IT,LV,LT,LU,MT,NL,PL,PT,RO,SK,SI,ES,SE'.split(','));
 
 export const PRICING = {
   roundUpTo: 5,

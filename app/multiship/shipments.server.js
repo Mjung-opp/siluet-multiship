@@ -2,7 +2,7 @@
 // one printable PDF per batch, and the day's DHL pickup.
 import { PDFDocument } from "pdf-lib";
 import db from "../db.server";
-import { ITEMS, itemKeyFromSku, DDP_SERVICE_CODE, SHIPPER } from "./src/config.js";
+import { ITEMS, itemKeyFromSku, DDP_SERVICE_CODE, DAP_SERVICE_CODE, SHIPPER, pltAllowed, EU27 } from "./src/config.js";
 import { buildParcels, itemCount } from "./src/parcels.js";
 import { dhlFor, pickupDay, dubaiDateTime } from "./settings.server.js";
 
@@ -22,7 +22,7 @@ const ORDER_FIELDS = `
   currentTotalDutiesSet { shopMoney { amount } }
   shippingAddress { name firstName lastName address1 address2 city provinceCode zip countryCodeV2 phone company }
   lineItems(first: 100) {
-    nodes { id sku title quantity requiresShipping originalUnitPriceSet { shopMoney { amount currencyCode } } customAttributes { key value } }
+    nodes { id sku title quantity requiresShipping variant { barcode } originalUnitPriceSet { shopMoney { amount currencyCode } } customAttributes { key value } }
   }`;
 
 /** Paid orders still waiting to ship (last 60 days). */
@@ -66,7 +66,7 @@ export async function planForOrder(shop, order) {
   if (!a) throw new Error("No shipping address");
   const lines = order.lineItems.nodes
     .filter((l) => l.requiresShipping && l.quantity > 0)
-    .map((l) => ({ sku: l.sku, title: l.title, quantity: l.quantity, unitPrice: Number(l.originalUnitPriceSet.shopMoney.amount) }));
+    .map((l) => ({ sku: l.sku, title: l.title, quantity: l.quantity, barcode: l.variant?.barcode || "", unitPrice: Number(l.originalUnitPriceSet.shopMoney.amount) }));
   const parcels = buildParcels(lines); // throws for City Lights or unknown SKUs
   const domestic = a.countryCodeV2 === SHIPPER.countryCode;
   const duties = Number(order.currentTotalDutiesSet?.shopMoney?.amount || 0);
@@ -113,6 +113,20 @@ export function uaeCity(a) {
   return hit;
 }
 
+// Saudi National Address: the short address code (4 letters + 4 digits, e.g. RRRD2929) goes in address line 3.
+export function saudiAddress(a) {
+  const re = /\b([A-Za-z]{4}\s?\d{4})\b/;
+  const found = [a.address2, a.address1].map((x) => (x || "").match(re)?.[1]).find(Boolean);
+  const code = found ? found.replace(/\s/g, "").toUpperCase() : "";
+  const strip = (x) => (x || "").replace(re, "").replace(/^[\s,]+|[\s,]+$/g, "");
+  const line1 = strip(a.address1) || a.address1;
+  const line2 = strip(a.address2);
+  return {
+    postalCode: a.zip || "", cityName: a.city, countryCode: "SA",
+    addressLine1: line1, ...(line2 ? { addressLine2: line2 } : {}), ...(code ? { addressLine3: code } : {}),
+  };
+}
+
 export function buildShipmentRequest({ settings, orderName, plan, recipient, letter, day }) {
   const quote = plan.quotes[recipient.id];
   const a = recipient.address;
@@ -121,7 +135,14 @@ export function buildShipmentRequest({ settings, orderName, plan, recipient, let
   const currency = plan.shopCurrency || "USD";
   const declaredValue = Math.round(recipient.lines.reduce((s, l) => s + l.unitPrice * l.quantity, 0) * 100) / 100;
   const incoterm = ddp ? "DDP" : "DAP";
-  const vas = [...(ddp ? [{ serviceCode: DDP_SERVICE_CODE }] : []), ...(domestic ? [] : [{ serviceCode: PLT_SERVICE_CODE }])];
+  // Value in USD for the PLT limit check (shop currency is USD; other currencies are close enough for a ceiling).
+  const plt = !domestic && pltAllowed(a.countryCode, declaredValue);
+  const vas = domestic ? [] : [{ serviceCode: ddp ? DDP_SERVICE_CODE : DAP_SERVICE_CODE }, ...(plt ? [{ serviceCode: PLT_SERVICE_CODE }] : [])];
+  // Line weights must add up exactly to the parcels (DHL certification). Net is a little under gross.
+  const parcelsKg = Math.round(quote.internal.parcels.reduce((t, p) => t + p.weight, 0) * 1000) / 1000;
+  const grossKg = recipient.lines.map((l) => Math.round(ITEMS[itemKeyFromSku(l.sku)].declaredWeightKg * l.quantity * 1000) / 1000);
+  grossKg[grossKg.length - 1] = Math.round((grossKg[grossKg.length - 1] + parcelsKg - grossKg.reduce((t, w) => t + w, 0)) * 1000) / 1000;
+  const eu = EU27.has(a.countryCode);
 
   return {
     plannedShippingDateAndTime: dubaiDateTime(day, settings.pickup.readyTime),
@@ -146,6 +167,7 @@ export function buildShipmentRequest({ settings, orderName, plan, recipient, let
               const extra = [a.address2, a.city && a.city.toLowerCase() !== city.toLowerCase() ? a.city : ""].filter(Boolean).join(", ");
               return { postalCode: "", cityName: city, countryCode: "AE", addressLine1: a.address1, ...(extra ? { addressLine2: extra.slice(0, 45) } : {}) };
             })()
+          : a.countryCode === "SA" ? saudiAddress(a)
           : {
               postalCode: a.zip || "", cityName: a.city, countryCode: a.countryCode,
               ...(a.provinceCode ? { provinceCode: a.provinceCode } : {}),
@@ -171,16 +193,24 @@ export function buildShipmentRequest({ settings, orderName, plan, recipient, let
         exportDeclarations: [{
           lineItems: recipient.lines.map((l, i) => {
             const item = ITEMS[itemKeyFromSku(l.sku)];
-            const inbound = item.importCodes?.[a.countryCode];
+            const inbound = item.importCodes?.[a.countryCode] || item.hsCode;
+            const gross = Math.max(0.001, grossKg[i]);
+            const net = Math.max(0.001, Math.round(gross * 0.9 * 1000) / 1000);
             return {
               number: i + 1,
               description: DESCRIPTIONS[item.line],
               price: l.unitPrice,
               quantity: { value: l.quantity, unitOfMeasurement: "PCS" },
-              commodityCodes: [{ typeCode: "outbound", value: item.hsCode }, ...(inbound ? [{ typeCode: "inbound", value: inbound }] : [])],
+              commodityCodes: [{ typeCode: "outbound", value: item.hsCode }, { typeCode: "inbound", value: inbound }],
               exportReasonType: "permanent",
               manufacturerCountry: "AE",
-              weight: { netValue: item.declaredWeightKg, grossValue: item.declaredWeightKg },
+              weight: { netValue: net, grossValue: gross },
+              // EU product identifiers: Siluet is the merchant and the maker, so the SKU is both IDs; barcode when there is one.
+              ...(eu ? { customerReferences: [
+                { typeCode: "ABW", value: String(l.sku).slice(0, 35) },
+                { typeCode: "MF", value: String(l.sku).slice(0, 35) },
+                ...(l.barcode ? [{ typeCode: "SRV", value: String(l.barcode).slice(0, 35) }] : []),
+              ] } : {}),
             };
           }),
           invoice: { number: `${orderName.replace("#", "")}-${letter}`, date: day },
@@ -319,6 +349,9 @@ export async function createLabelBatch({ admin, shop, settings, orderIds }) {
       try {
         const res = await dhl.createShipment(buildShipmentRequest({ settings, orderName: order.name, plan, recipient: r, letter: letter || "A", day }));
         const label = (res.documents || []).find((d) => d.typeCode === "label")?.content;
+        const paperInvoice = !(res.documents || []).length ? null
+          : r.address.countryCode !== SHIPPER.countryCode && !pltAllowed(r.address.countryCode, r.lines.reduce((t, l) => t + l.unitPrice * l.quantity, 0))
+            ? (res.documents || []).find((d) => d.typeCode === "invoice")?.content : null;
         const tn = res.shipmentTrackingNumber;
         const url = `${settings.tracking.baseUrl.replace(/\/$/, "")}/apps/multiship/track?t=${tn}`;
         const f = await fulfil(admin, order.id, r.id, plan.type === "single", tn, url);
@@ -330,6 +363,10 @@ export async function createLabelBatch({ admin, shop, settings, orderIds }) {
         if (label) {
           const src = await PDFDocument.load(Buffer.from(label, "base64"));
           (await merged.copyPages(src, src.getPageIndices())).forEach((pg) => merged.addPage(pg));
+        }
+        if (paperInvoice) {
+          const inv = await PDFDocument.load(Buffer.from(paperInvoice, "base64"));
+          for (let copy = 0; copy < 2; copy++) (await merged.copyPages(inv, inv.getPageIndices())).forEach((pg) => merged.addPage(pg));
         }
         summary.push({ order: order.name, letter, name: r.address.name, tracking: tn, fulfilError: f.ok ? undefined : f.error });
       } catch (e) {
