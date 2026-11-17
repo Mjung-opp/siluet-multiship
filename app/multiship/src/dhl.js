@@ -9,22 +9,28 @@ const BASE = {
   live: 'https://express.api.dhl.com/mydhlapi',
 };
 
+// The parcel service gives POST /shipments 60 s. The outcome of a timed out call is unknown: never resend it.
+// The legacy batch passes no timeout and keeps its previous behaviour.
+export const SHIPMENT_TIMEOUT_MS = 60_000;
+
 export function createDhlClient({ apiKey, apiSecret, accountNumber, env = 'test', fetchImpl = fetch, now = () => new Date() }) {
   if (!apiKey || !apiSecret || !accountNumber) throw new Error('DHL credentials missing');
   const auth = 'Basic ' + Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
   const base = BASE[env];
 
-  async function post(path, body) {
+  async function post(path, body, { timeoutMs } = {}) {
     const res = await fetchImpl(`${base}${path}`, {
       method: 'POST',
       headers: { Authorization: auth, 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify(body),
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok) {
       const extra = Array.isArray(json.additionalDetails) ? ` (${json.additionalDetails.join('; ')})` : '';
       const err = new Error(`DHL ${path} ${res.status}: ${json.detail || json.title || 'request failed'}${extra}`);
       err.dhl = json;
+      err.status = res.status;
       throw err;
     }
     return json;
@@ -77,6 +83,34 @@ export function createDhlClient({ apiKey, apiSecret, accountNumber, env = 'test'
     return { productCode, price: price.price, currency: price.priceCurrency, domestic };
   }
 
+  /**
+   * Every DHL service available for these pieces (Operations parcel service). The storefront keeps rate().
+   * ETA: products[].deliveryCapabilities.estimatedDeliveryDateAndTime (MyDHL API v2 field name, confirm with
+   * scripts/parcel-rates-sandbox.js).
+   */
+  async function rates({ address, parcels, declaredValue, currency, ddp = false }) {
+    const { domestic, body } = common(address, parcels);
+    const res = await post('/rates', {
+      ...body,
+      plannedShippingDateAndTime: dhlDate(nextDispatch(now())),
+      isCustomsDeclarable: !domestic,
+      ...(domestic || !(declaredValue > 0) ? {} : { monetaryAmount: [{ typeCode: 'declaredValue', value: declaredValue, currency }] }),
+      ...(ddp && !domestic ? { valueAddedServices: [{ serviceCode: DDP_SERVICE_CODE }] } : {}),
+      nextBusinessDay: true,
+    });
+    return (res.products || []).flatMap((p) => {
+      let price;
+      try { price = pickPrice(p.totalPrice); } catch { return []; }
+      return [{
+        productCode: p.productCode,
+        name: p.productName || p.productCode,
+        price: price.price,
+        currency: price.priceCurrency,
+        estimatedDelivery: p.deliveryCapabilities?.estimatedDeliveryDateAndTime || null,
+      }];
+    });
+  }
+
   /** Estimated duties and taxes for the destination (DHL Landed Cost). */
   async function dutiesAndTaxes({ address, parcels, lines, currency }) {
     const { productCode, body } = common(address, parcels);
@@ -116,9 +150,9 @@ export function createDhlClient({ apiKey, apiSecret, accountNumber, env = 'test'
     return parseLandedCost(res, currency);
   }
 
-  /** Create a shipment and label (POST /shipments). Returns DHL's response as is. */
-  async function createShipment(body) {
-    return post('/shipments', body);
+  /** Create a shipment and label (POST /shipments). Returns DHL's response as is. timeoutMs: parcel path only. */
+  async function createShipment(body, { timeoutMs } = {}) {
+    return post('/shipments', body, { timeoutMs });
   }
 
   /** Book a courier pickup (POST /pickups). */
@@ -152,7 +186,7 @@ export function createDhlClient({ apiKey, apiSecret, accountNumber, env = 'test'
     return json;
   }
 
-  return { rate, dutiesAndTaxes, createShipment, createPickup, cancelPickup, track };
+  return { rate, rates, dutiesAndTaxes, createShipment, createPickup, cancelPickup, track };
 }
 
 // BILLC = billing currency of the DHL account. Fall back to the first price.

@@ -40,7 +40,7 @@ export async function listOpenOrders(admin) {
   return data.orders.nodes;
 }
 
-async function getOrder(admin, legacyId) {
+export async function getOrder(admin, legacyId) {
   const res = await admin.graphql(
     `#graphql
     query OneOrder($id: ID!) { order(id: $id) { ${ORDER_FIELDS} } }`,
@@ -127,21 +127,57 @@ export function saudiAddress(a) {
   };
 }
 
-export function buildShipmentRequest({ settings, orderName, plan, recipient, letter, day }) {
+/**
+ * Parcel path only: line gross weights (kg) that add up exactly to the packed pieces. Each line keeps its share of
+ * the declared item weights, in whole grams, at least 1 g (DHL's 0.001 kg minimum); the last line absorbs rounding.
+ * Never exceeds the pieces total: if the pieces are lighter than 1 g per line, it throws instead.
+ */
+export function lineWeightsForPieces(declaredKg, piecesKg) {
+  const n = declaredKg.length;
+  const total = Math.round(piecesKg * 1000);
+  if (total < n) {
+    const e = new Error(`The pieces weigh ${piecesKg} kg, too little for ${n} customs lines of at least 0.001 kg each`);
+    e.code = "PIECES_TOO_LIGHT";
+    throw e;
+  }
+  const grams = declaredKg.map((kg) => Math.max(1, Math.round(kg * 1000)));
+  const sum = grams.reduce((t, g) => t + g, 0);
+  const out = grams.map((g) => 1 + Math.floor(((total - n) * g) / sum));
+  out[n - 1] += total - out.reduce((t, g) => t + g, 0);
+  return out.map((g) => g / 1000);
+}
+
+/** Customs mode of one recipient's shipment: domestic, and whether DHL Paperless Trade (WY) applies. */
+export function customsMode({ plan, recipient }) {
+  const domestic = plan.quotes[recipient.id].internal.productCode === "N";
+  const declaredValue = Math.round(recipient.lines.reduce((s, l) => s + l.unitPrice * l.quantity, 0) * 100) / 100;
+  // Value in USD for the PLT limit check (shop currency is USD; other currencies are close enough for a ceiling).
+  return { domestic, declaredValue, plt: !domestic && pltAllowed(recipient.address.countryCode, declaredValue) };
+}
+
+/**
+ * The DHL shipment request certified by DHL (Nov 2026). Both the legacy batch and the parcel service use it.
+ * Parcel service only: `pieces` replaces the automatic parcels (line gross weights are scaled to them),
+ * `customerReference` (the parcelId) replaces `${orderName}-${letter}` on the shipment, the packages and the
+ * export declaration's invoice number, and `invoiceImage` decides whether DHL returns a
+ * commercial invoice image. Left out, the output is exactly the certified legacy request.
+ */
+export function buildShipmentRequest({ settings, orderName, plan, recipient, letter, day, pieces, customerReference, invoiceImage }) {
   const quote = plan.quotes[recipient.id];
   const a = recipient.address;
-  const domestic = quote.internal.productCode === "N";
+  const { domestic, declaredValue, plt } = customsMode({ plan, recipient });
   const ddp = !domestic && Boolean(plan.ddpChoices?.[recipient.id] && quote.ddp?.available);
   const currency = plan.shopCurrency || "USD";
-  const declaredValue = Math.round(recipient.lines.reduce((s, l) => s + l.unitPrice * l.quantity, 0) * 100) / 100;
   const incoterm = ddp ? "DDP" : "DAP";
-  // Value in USD for the PLT limit check (shop currency is USD; other currencies are close enough for a ceiling).
-  const plt = !domestic && pltAllowed(a.countryCode, declaredValue);
   const vas = domestic ? [] : [{ serviceCode: ddp ? DDP_SERVICE_CODE : DAP_SERVICE_CODE }, ...(plt ? [{ serviceCode: PLT_SERVICE_CODE }] : [])];
+  const parcels = pieces || quote.internal.parcels;
+  const shipmentRef = customerReference || `${orderName}-${letter}`;
+  const withInvoice = !domestic && (invoiceImage ?? true);
   // Line weights must add up exactly to the parcels (DHL certification). Net is a little under gross.
-  const parcelsKg = Math.round(quote.internal.parcels.reduce((t, p) => t + p.weight, 0) * 1000) / 1000;
+  const parcelsKg = Math.round(parcels.reduce((t, p) => t + p.weight, 0) * 1000) / 1000;
   const grossKg = recipient.lines.map((l) => Math.round(ITEMS[itemKeyFromSku(l.sku)].declaredWeightKg * l.quantity * 1000) / 1000);
-  grossKg[grossKg.length - 1] = Math.round((grossKg[grossKg.length - 1] + parcelsKg - grossKg.reduce((t, w) => t + w, 0)) * 1000) / 1000;
+  if (pieces) grossKg.splice(0, grossKg.length, ...lineWeightsForPieces(grossKg, parcelsKg));
+  else grossKg[grossKg.length - 1] = Math.round((grossKg[grossKg.length - 1] + parcelsKg - grossKg.reduce((t, w) => t + w, 0)) * 1000) / 1000;
   const eu = EU27.has(a.countryCode);
 
   return {
@@ -154,10 +190,10 @@ export function buildShipmentRequest({ settings, orderName, plan, recipient, let
       encodingFormat: "pdf",
       imageOptions: [
         { typeCode: "label", templateName: settings.label.template },
-        ...(domestic ? [] : [{ typeCode: "invoice", templateName: "COMMERCIAL_INVOICE_P_10", isRequested: true, invoiceType: "commercial" }]),
+        ...(withInvoice ? [{ typeCode: "invoice", templateName: "COMMERCIAL_INVOICE_P_10", isRequested: true, invoiceType: "commercial" }] : []),
       ],
     },
-    customerReferences: [{ value: `${orderName}-${letter}`, typeCode: "CU" }],
+    customerReferences: [{ value: shipmentRef, typeCode: "CU" }],
     customerDetails: {
       shipperDetails: shipper(settings),
       receiverDetails: {
@@ -178,10 +214,10 @@ export function buildShipmentRequest({ settings, orderName, plan, recipient, let
       },
     },
     content: {
-      packages: quote.internal.parcels.map((p, i) => ({
+      packages: parcels.map((p, i) => ({
         weight: p.weight,
         dimensions: { length: p.length, width: p.width, height: p.height },
-        customerReferences: [{ value: `${orderName}-${letter}-${i + 1}`, typeCode: "CU" }],
+        customerReferences: [{ value: `${shipmentRef}-${i + 1}`, typeCode: "CU" }],
       })),
       isCustomsDeclarable: !domestic,
       description: "Wall art",
@@ -213,7 +249,8 @@ export function buildShipmentRequest({ settings, orderName, plan, recipient, let
               ] } : {}),
             };
           }),
-          invoice: { number: `${orderName.replace("#", "")}-${letter}`, date: day },
+          // Parcel path: one invoice per DHL shipment, numbered with the (unique) parcelId.
+          invoice: { number: customerReference || `${orderName.replace("#", "")}-${letter}`, date: day },
           exportReason: "Sale",
           shipmentType: "personal",
           incoterm,
@@ -337,6 +374,11 @@ export async function createLabelBatch({ admin, shop, settings, orderIds }) {
   for (const legacyId of orderIds) {
     const order = await getOrder(admin, legacyId);
     if (!order) { summary.push({ orderId: legacyId, error: "Order not found" }); continue; }
+    // Orders shipped through the Operations parcel service are never labelled here as well.
+    if (await db.parcel.findFirst({ where: { shop, orderId: String(legacyId) } })) {
+      summary.push({ order: order.name, error: "Labelled in Operations (parcel service), skipped here." });
+      continue;
+    }
     let plan;
     try { plan = await planForOrder(shop, order); } catch (e) { summary.push({ order: order.name, error: e.message }); continue; }
     plansUsed.push(plan);

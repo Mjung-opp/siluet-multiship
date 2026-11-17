@@ -95,3 +95,54 @@ model PickupBooking {
 
   @@unique([shop, date])
 }
+
+// One DHL shipment booked by the Operations parcel service (POST /internal/parcels).
+// id is the parcelId chosen by Operations; it is never reused after "rejected".
+model Parcel {
+  id                   String    @id
+  shop                 String
+  orderId              String
+  orderName            String?
+  recipientId          String
+  productCode          String
+  quotedPrice          String?
+  pieces               String
+  lines                String
+  requestHash          String
+  requestJson          String
+  status               String    @default("pending")
+  claimedAt            DateTime  @default(now())
+  trackingNumber       String?
+  pieceTrackingNumbers String?
+  label                String?
+  labelDocuments       String?
+  invoice              String?
+  customsPaperRequired Boolean   @default(false)
+  error                String?
+  lateTrackingNumber   String?
+  lateLabel            String?
+  lateAt               DateTime?
+  reconciledBy         String?
+  reconciledAt         DateTime?
+  closedAt             DateTime?
+  shopifyFulfillmentId String?
+  redactedAt           DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([shop, orderId])
+  @@index([status, claimedAt])
+  @@index([trackingNumber])
+}
+
+// Events the audit op returns, e.g. duplicate_shipment_suspected.
+model ParcelAlert {
+  id        String   @id @default(cuid())
+  shop      String
+  parcelId  String
+  type      String
+  detail    String?
+  createdAt DateTime @default(now())
+
+  @@index([shop, createdAt])
+}

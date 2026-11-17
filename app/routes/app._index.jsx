@@ -5,11 +5,11 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { getSettings, pickupDay, dhlFor } from "../multiship/settings.server.js";
 import { listOpenOrders, createLabelBatch, planForOrder } from "../multiship/shipments.server.js";
+import { isLocked } from "../multiship/lock.js";
 
-// Real labels stay off until DHL has certified our shipments (Render env DHL_SHIPMENTS_CERTIFIED=1) and Mode is Live.
-// Until then orders are booked by hand in MyDHL. Test labels stay on the dev store only.
-const DEV_STORE = "siluet-multiship-test.myshopify.com";
-const isLocked = (settings, shop) => shop !== DEV_STORE && (settings.dhl.env !== "live" || process.env.DHL_SHIPMENTS_CERTIFIED !== "1");
+// LEGACY_BATCH_DISABLED=1 (Render env) switches this page's label batch off once Operations prints every
+// label through /internal/parcels. Default off: the batch keeps working.
+const legacyBatchDisabled = () => process.env.LEGACY_BATCH_DISABLED === "1";
 
 async function manualDetails(shop, order) {
   try {
@@ -45,11 +45,13 @@ export const loader = async ({ request }) => {
   const batches = await db.labelBatch.findMany({ where: { shop }, orderBy: { createdAt: "desc" }, take: 5, select: { id: true, createdAt: true, summary: true, pickup: true, pdf: false } });
   const missingSender = !settings.sender.phone || !settings.sender.contactName;
   const locked = isLocked(settings, shop);
+  const legacyDisabled = legacyBatchDisabled();
   const manual = locked ? Object.fromEntries(await Promise.all(orders.map(async (o) => [o.legacyResourceId, await manualDetails(shop, o)]))) : {};
 
   return {
     env: settings.dhl.env,
     locked,
+    legacyDisabled,
     missingSender,
     day,
     pickup: pickup ? { confirmation: pickup.confirmation, error: pickup.error } : null,
@@ -95,6 +97,7 @@ export const action = async ({ request }) => {
   }
   const orderIds = form.getAll("order").map(String);
   if (!orderIds.length) return { error: "Select at least one order." };
+  if (legacyBatchDisabled()) return { error: "Labels are printed in Operations now. This batch is switched off (LEGACY_BATCH_DISABLED)." };
   const settings = await getSettings(session.shop);
   if (isLocked(settings, session.shop)) return { error: "Labels are switched off until DHL production access is live. Book these in MyDHL for now." };
   if (!settings.sender.phone) return { error: "Add your sender phone in Settings first. DHL needs it on every label." };
@@ -117,7 +120,7 @@ function PdfButton({ batchId, children }) {
 }
 
 export default function Orders() {
-  const { orders, env, locked, day, pickup, batches, missingSender } = useLoaderData();
+  const { orders, env, locked, legacyDisabled, day, pickup, batches, missingSender } = useLoaderData();
   const fetcher = useFetcher();
   const [picked, setPicked] = useState({});
   const busy = fetcher.state !== "idle";
@@ -192,7 +195,7 @@ export default function Orders() {
               </s-box>
             ))}
             {orders.length === 0 && <s-paragraph>Nothing waiting. Lovely.</s-paragraph>}
-            {!locked && <s-button type="submit" variant="primary" loading={busy || undefined} disabled={!Object.values(picked).some(Boolean) || undefined}>
+            {!locked && !legacyDisabled && <s-button type="submit" variant="primary" loading={busy || undefined} disabled={!Object.values(picked).some(Boolean) || undefined}>
               Create labels for selected
             </s-button>}
           </s-stack>

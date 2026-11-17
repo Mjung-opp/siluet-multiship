@@ -1,5 +1,17 @@
 # @shopify/shopify-app-template-react-router
 
+## Siluet Multiship 2026.11.17 — Operations parcel service (M4)
+- `POST /internal/parcels` (HMAC signed with `OPERATIONS_SERVICE_KEY`): plan, rates, create, status, label, reconcile, audit.
+- `Parcel` and `ParcelAlert` tables (migration `20261117120000_parcel_service`).
+- `buildShipmentRequest` takes explicit pieces, a customer reference and an invoice image flag; the legacy output is unchanged and pinned by tests against the DHL-certified request.
+- DHL `/shipments` calls time out after 60 s; `rates()` lists every DHL service with its ETA.
+- The Orders page batch skips orders that have parcels; `LEGACY_BATCH_DISABLED=1` switches it off.
+- `npm test` runs the Multiship tests.
+- Fix round: per-order claim lock plus a post-insert check (`quantity_conflict`, no DHL call); `legacy_label_exists` for recipients already labelled by the batch; DHL result saved raw before PDF work (migration `20261117150000_parcel_label_documents`); 60 s timeout on the parcel path only; customs line weights scaled to the packed pieces; `PARCEL_SHOPS` allow-list (unset = no shop); byte-capped body; `PARCEL_NO_SHIPMENT_MIN_AGE_SECONDS` (≥ 180 s); DHL rate refusals answer 422.
+- Parcel claims are ordered by SQLite's single-writer `rowid` (commit order); the per-order lock only serialises within one process. Another database needs a serialisable transaction or row lock instead.
+- `Parcel.shopifyFulfillmentId` (migration `20261117180000_parcel_fulfillment_id`): fulfilled parcels are matched to Shopify by fulfilment ID, tracking number as fallback.
+- **Certified field changed on the parcel path only:** the commercial invoice number (`exportDeclarations[0].invoice.number`) is the `parcelId`. The owner should confirm this with DHL before Production. Legacy batch output is unchanged.
+
 ## 2026.10.21
 - Update `@shopify/shopify-app-react-router` to v4, which loads Polaris web components 2.x (`polaris-2.js`) by default. New apps render with the Admin Next look. To stay on Polaris 1.x, pass `polarisUrl="https://cdn.shopify.com/shopifycloud/polaris-1.js"` to both `AppProvider` and `shopifyApp`.
 - Update `@shopify/polaris-types` to v2 so the `s-*` component types match the Polaris version loaded at runtime.
