@@ -4,7 +4,7 @@
 import { unauthenticated } from "../shopify.server";
 import { getSettings, dhlFor } from "../multiship/settings.server.js";
 import { isLocked } from "../multiship/lock.js";
-import { verifyParcelRequest, parcelShops, readBodyCapped } from "../multiship/parcel-auth.js";
+import { verifyParcelRequest, parcelShops, readBodyCapped, isStaleCreate } from "../multiship/parcel-auth.js";
 import { handleParcelOp, ParcelError } from "../multiship/parcel-shipping.server.js";
 
 const SHOP_RE = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
@@ -19,9 +19,10 @@ export const action = async ({ request }) => {
   const rawBody = await readBodyCapped(request, MAX_BODY);
   if (rawBody === null) return reply({ error: "Request too large", code: "too_large" }, 413);
 
+  const timestamp = request.headers.get("X-Siluet-Timestamp");
   const auth = verifyParcelRequest({
     key: process.env.OPERATIONS_SERVICE_KEY,
-    timestamp: request.headers.get("X-Siluet-Timestamp"),
+    timestamp,
     signature: request.headers.get("X-Siluet-Signature"),
     rawBody,
   });
@@ -32,6 +33,8 @@ export const action = async ({ request }) => {
   if (!body || typeof body !== "object" || !SHOP_RE.test(String(body.shop || ""))) {
     return reply({ error: "shop must be a myshopify.com domain", code: "bad_request" }, 400);
   }
+  // Signed create older than 60 s: refused before the claim and before DHL (Operations retries with a new request).
+  if (body.op === "create" && isStaleCreate(timestamp)) return reply({ error: "stale_request", code: "stale_request" }, 409);
   const shop = body.shop;
   const allowed = parcelShops();
   if (!allowed.length) return reply({ error: "No shop is enabled for the parcel service (PARCEL_SHOPS)", code: "shops_not_configured" }, 503);

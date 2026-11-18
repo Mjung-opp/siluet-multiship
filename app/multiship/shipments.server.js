@@ -2,7 +2,7 @@
 // one printable PDF per batch, and the day's DHL pickup.
 import { PDFDocument } from "pdf-lib";
 import db from "../db.server";
-import { ITEMS, itemKeyFromSku, DDP_SERVICE_CODE, DAP_SERVICE_CODE, SHIPPER, pltAllowed, EU27 } from "./src/config.js";
+import { ITEMS, itemKeyFromSku, DDP_SERVICE_CODE, DAP_SERVICE_CODE, SHIPPER, pltAllowed, EU27, UnsupportedItemError } from "./src/config.js";
 import { buildParcels, itemCount } from "./src/parcels.js";
 import { dhlFor, pickupDay, dubaiDateTime } from "./settings.server.js";
 
@@ -53,7 +53,7 @@ export async function getOrder(admin, legacyId) {
  * A shipping plan for any order. Multi address orders use the plan saved at checkout.
  * Single address orders: one recipient, DDP when the customer paid duties at checkout.
  */
-export async function planForOrder(shop, order) {
+export async function planForOrder(shop, order, { allowUnsupported = false } = {}) {
   const msId = order.customAttributes.find((a) => a.key === "_multiship_id")?.value;
   if (msId) {
     const rec = await db.multishipCheckout.findUnique({ where: { id: msId } });
@@ -67,7 +67,10 @@ export async function planForOrder(shop, order) {
   const lines = order.lineItems.nodes
     .filter((l) => l.requiresShipping && l.quantity > 0)
     .map((l) => ({ sku: l.sku, title: l.title, quantity: l.quantity, barcode: l.variant?.barcode || "", unitPrice: Number(l.originalUnitPriceSet.shopMoney.amount) }));
-  const parcels = buildParcels(lines); // throws for City Lights or unknown SKUs
+  // Throws for City Lights or unknown SKUs. The parcel service asks for the plan anyway (allowUnsupported) and then
+  // refuses those recipients itself; nothing is invented for them (parcels stay null).
+  let parcels = null;
+  try { parcels = buildParcels(lines); } catch (e) { if (!allowUnsupported || !(e instanceof UnsupportedItemError)) throw e; }
   const domestic = a.countryCodeV2 === SHIPPER.countryCode;
   const duties = Number(order.currentTotalDutiesSet?.shopMoney?.amount || 0);
   const r = {

@@ -1,5 +1,12 @@
 # @shopify/shopify-app-template-react-router
 
+## Siluet Multiship 2026.11.17b — parcel plan and audit additions (M5)
+- `plan`: per recipient `dhlCity` (UAE emirate as sent to DHL), `supported` and `reason` (recipients with SKUs that have no customs data are listed, and `create` refuses them with 422 `unsupported_recipient` before DHL); per line `unitPrice` (decimal string) and `currency`.
+- `audit`: `duplicateOrders` (recipients covered by more than one live DHL shipment across parcels and legacy batch labels).
+- `audit` stays fast: the Shopify line check behind `duplicateOrders` only runs for recipients with a parcel from the last 7 days, 4 lookups at a time, at most 50 (then `truncated: true`).
+- `create` signed more than 60 s ago (`CREATE_MAX_AGE_SECONDS`) is refused with 409 `stale_request` before the claim and before DHL; other ops keep the 300 s window.
+- All fields are additive; Operations treats them as optional, so an older Multiship keeps working.
+
 ## Siluet Multiship 2026.11.17 — Operations parcel service (M4)
 - `POST /internal/parcels` (HMAC signed with `OPERATIONS_SERVICE_KEY`): plan, rates, create, status, label, reconcile, audit.
 - `Parcel` and `ParcelAlert` tables (migration `20261117120000_parcel_service`).

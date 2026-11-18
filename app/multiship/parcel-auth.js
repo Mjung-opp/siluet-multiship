@@ -6,6 +6,14 @@
 import crypto from "node:crypto";
 
 export const MAX_SKEW_SECONDS = 300;
+// A create books a DHL label. Operations releases a pending parcel after 7 minutes, so a create signed more than
+// 60 s ago is refused (409 stale_request) before the claim; the other ops keep the 300 s window.
+export const CREATE_MAX_AGE_SECONDS = 60;
+
+/** True when a signed create is too old to book: older than CREATE_MAX_AGE_SECONDS by the server clock. */
+export function isStaleCreate(timestamp, now = Date.now()) {
+  return Math.floor(now / 1000) - Number(timestamp) > CREATE_MAX_AGE_SECONDS;
+}
 
 const cleanKey = (key) => String(key ?? "").trim();
 

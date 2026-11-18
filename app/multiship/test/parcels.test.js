@@ -18,6 +18,8 @@ const SHOP = 'test-shop.myshopify.com';
 const ADDR = {
   DE: { name: 'Test Recipient', phone: '+10000000000', address1: 'Teststrasse 1', city: 'Berlin', zip: '10115', countryCode: 'DE' },
   TR: { name: 'Test Recipient', phone: '+10000000000', address1: 'Test Sokak 1', city: 'Istanbul', zip: '34000', countryCode: 'TR' },
+  AE: { name: 'Test Recipient', phone: '+971000000001', address1: 'Test Tower 1', city: 'Business Bay', provinceCode: 'DU', countryCode: 'AE' },
+  AE_NO_EMIRATE: { name: 'Test Recipient', phone: '+971000000001', address1: 'Test Tower 1', city: 'Somewhere', countryCode: 'AE' },
 };
 const LINES = [
   { id: '11', sku: 'SMB-BERLIN', quantity: 1, unitPrice: 135, barcode: '0000000000017' },
@@ -954,4 +956,270 @@ test('fulfilment ID is also recorded when Shopify already had the fulfilment (an
   shopify.failAfter.ParcelFulfil = new Error('connection reset');
   assert.equal((await op(createBody())).status, 'fulfilled');
   assert.equal(row(db).shopifyFulfillmentId, 'gid://shopify/Fulfillment/1');
+});
+
+
+// ---------- M5: plan additions (dhlCity, line prices, unsupported recipients) and the duplicate audit ----------
+
+test('plan: dhlCity is the city the shipment builder sends to DHL (UAE emirate), city stays as in Shopify', async () => {
+  const { op, dhl } = await setup({ country: 'AE' });
+  const plan = await op({ op: 'plan', orderId: '1001' });
+  const r = plan.recipients[0];
+  assert.equal(r.city, 'Business Bay');
+  assert.equal(r.dhlCity, 'Dubai');
+  await op(createBody({ productCode: 'N' }));
+  assert.equal(dhl.calls[0].customerDetails.receiverDetails.postalAddress.cityName, r.dhlCity);
+
+  const de = await setup();
+  const dePlan = await de.op({ op: 'plan', orderId: '1001' });
+  assert.equal(dePlan.recipients[0].dhlCity, 'Berlin');
+  await de.op(createBody());
+  assert.equal(de.dhl.calls[0].customerDetails.receiverDetails.postalAddress.cityName, dePlan.recipients[0].dhlCity);
+
+  const none = await setup({ country: 'AE_NO_EMIRATE' });
+  assert.equal((await none.op({ op: 'plan', orderId: '1001' })).recipients[0].dhlCity, null);
+});
+
+test('plan: lines carry unitPrice (decimal string) and currency from originalUnitPriceSet; create customs prices unchanged', async () => {
+  const { op, dhl } = await setup();
+  const plan = await op({ op: 'plan', orderId: '1001' });
+  assert.deepEqual(plan.recipients[0].lines.map((l) => [l.lineItemId, l.unitPrice, l.currency]),
+    [['gid://shopify/LineItem/11', '135', 'USD'], ['gid://shopify/LineItem/12', '165', 'USD']]);
+  assert.equal(plan.recipients[0].supported, true);
+  assert.equal(plan.recipients[0].reason, undefined);
+  await op(createBody());
+  assert.deepEqual(dhl.calls[0].content.exportDeclarations[0].lineItems.map((l) => l.price), [135, 165]);
+  assert.equal(dhl.calls[0].content.declaredValue, 465);
+});
+
+test('plan: a recipient with a SKU that has no customs data is listed as unsupported; create refuses it before DHL', async () => {
+  const lines = [{ id: '61', sku: 'LB-ST-DUBAI', quantity: 1, unitPrice: 300 }, { id: '62', sku: 'SMB-BERLIN', quantity: 1, unitPrice: 135 }];
+  const { op, dhl, db } = await setup({ lines });
+  const plan = await op({ op: 'plan', orderId: '1001' });
+  const r = plan.recipients[0];
+  assert.equal(r.supported, false);
+  assert.equal(r.reason, 'No customs data for SKU LB-ST-DUBAI');
+  assert.deepEqual(r.lines.map((l) => [l.lineItemId, l.remainingQuantity]), [['gid://shopify/LineItem/61', 1], ['gid://shopify/LineItem/62', 1]]);
+  await assert.rejects(op(createBody({ lines: [{ lineItemId: '62', quantity: 1 }] })), (e) => {
+    assert.equal(e.code, 'unsupported_recipient');
+    assert.equal(e.status, 422);
+    return true;
+  });
+  assert.equal(dhl.calls.length, 0);
+  assert.equal(db.parcel.rows.size, 0);
+});
+
+const legacyRow = (db, tn, over = {}) => db.shipment.create({ data: {
+  shop: SHOP, orderId: '1001', orderName: '#1001', recipientId: 'r1', letter: '-', name: 'Test Recipient', country: 'DE', trackingNumber: tn, fulfilled: true, ...over,
+} });
+
+test('audit duplicateOrders: a legacy batch label and a parcel label for the same recipient', async () => {
+  const { op, db } = await setup();
+  await op(createBody());
+  const legacy = await legacyRow(db, '5550001111');
+  const audit = await op({ op: 'audit' });
+  assert.deepEqual(audit.duplicateOrders, [{
+    orderId: '1001', recipientId: 'r1', trackingNumbers: ['900000001', '5550001111'],
+    parcelIds: ['PCL-1'], legacyShipmentIds: [legacy.id], reason: 'legacy_and_parcel',
+  }]);
+  assert.deepEqual(Object.keys(audit), ['redacted', 'alerts', 'needsReconciliation', 'duplicateOrders']);
+});
+
+test('audit duplicateOrders: two legacy labels for one recipient', async () => {
+  const { op, db } = await setup();
+  const a = await legacyRow(db, '5550001111');
+  const b = await legacyRow(db, '5550002222');
+  const [d] = (await op({ op: 'audit' })).duplicateOrders;
+  assert.equal(d.reason, 'several_legacy_labels');
+  assert.deepEqual(d.legacyShipmentIds, [a.id, b.id]);
+  assert.deepEqual(d.parcelIds, []);
+});
+
+test('audit duplicateOrders: separate parcels are normal; the same tracking twice counts once; late labels stay in alerts', async () => {
+  const { op, db } = await setup();
+  await op(createBody({ parcelId: 'PCL-A', pieces: [TWO_PIECES[0]], lines: [{ lineItemId: '11', quantity: 1 }, { lineItemId: '12', quantity: 1 }] }));
+  await op(createBody({ parcelId: 'PCL-B', pieces: [TWO_PIECES[1]], lines: [{ lineItemId: '12', quantity: 1 }] }));
+  assert.equal(db.shipment.rows.size, 2); // the parcels' own tracking rows (same tracking numbers)
+  await db.parcel.create({ data: {
+    id: 'PCL-R', shop: SHOP, orderId: '1001', recipientId: 'r1', productCode: 'P', pieces: '[]', lines: JSON.stringify([{ lineItemId: 'gid://shopify/LineItem/12', quantity: 2 }]),
+    requestHash: 'x', requestJson: '{}', status: 'rejected', lateTrackingNumber: '900000099', claimedAt: new Date(),
+  } });
+  assert.deepEqual((await op({ op: 'audit' })).duplicateOrders, []);
+});
+
+test('audit duplicateOrders: parcels covering more of a line than the order has', async () => {
+  const { op, db } = await setup();
+  await op(createBody({ parcelId: 'PCL-A', lines: [{ lineItemId: '12', quantity: 2 }] }));
+  await db.parcel.create({ data: {
+    id: 'PCL-X', shop: SHOP, orderId: '1001', recipientId: 'r1', productCode: 'P', pieces: '[]', lines: JSON.stringify([{ lineItemId: 'gid://shopify/LineItem/12', quantity: 1 }]),
+    requestHash: 'x', requestJson: '{}', status: 'label_created', trackingNumber: '900000077', claimedAt: new Date(),
+  } });
+  const [d] = (await op({ op: 'audit' })).duplicateOrders;
+  assert.equal(d.reason, 'line_over_covered');
+  assert.deepEqual(d.trackingNumbers, ['900000001', '900000077']);
+  assert.deepEqual(d.parcelIds, ['PCL-A', 'PCL-X']);
+});
+
+// ---------- Duplicate audit cost: recent-only Shopify line check, bounded concurrency, cap ----------
+
+let tnSeq = 0;
+const trackedParcel = (db, orderId, id) => db.parcel.create({ data: {
+  id, shop: SHOP, orderId, recipientId: 'r1', productCode: 'P', pieces: '[]',
+  lines: JSON.stringify([{ lineItemId: 'gid://shopify/LineItem/1', quantity: 1 }]),
+  requestHash: 'x', requestJson: '{}', status: 'fulfilled', trackingNumber: `8${String(++tnSeq).padStart(9, '0')}`, claimedAt: new Date(),
+} });
+const orderLookups = (shopify) => shopify.calls.filter((c) => c === 'OneOrder').length;
+
+test('audit line check: only recipients with a parcel in the last 7 days hit Shopify; no-Shopify rules keep 90 days', async () => {
+  assert.equal(svc.DUPLICATE_LINECHECK_RECENT_MS, 7 * 24 * 3600 * 1000);
+  const { op, db, clock, shopify } = await setup();
+  await trackedParcel(db, '3002', 'LEG-P'); // legacy + parcel, 30 days old: still reported without Shopify
+  await legacyRow(db, '5550009999', { orderId: '3002' });
+  clock.advance(22 * 86400);
+  await trackedParcel(db, '3001', 'OLD-1'); // two parcel labels, 8 days old: not line-checked
+  await trackedParcel(db, '3001', 'OLD-2');
+  clock.advance(8 * 86400);
+  await trackedParcel(db, '3003', 'NEW-1'); // recent: line-checked (the fake has no order 3003 → over covered)
+  await trackedParcel(db, '3003', 'NEW-2');
+  shopify.calls.length = 0;
+  const audit = await op({ op: 'audit' });
+  assert.equal(orderLookups(shopify), 1);
+  assert.deepEqual(audit.duplicateOrders.map((d) => [d.orderId, d.reason]), [['3002', 'legacy_and_parcel'], ['3003', 'line_over_covered']]);
+  assert.equal(audit.truncated, undefined);
+});
+
+test('audit line check: at most 4 Shopify lookups at a time, and they do run in parallel', async () => {
+  assert.equal(svc.DUPLICATE_LINECHECK_CONCURRENCY, 4);
+  const { op, db, shopify } = await setup();
+  for (let i = 0; i < 10; i++) { await trackedParcel(db, `40${i}`, `C${i}-1`); await trackedParcel(db, `40${i}`, `C${i}-2`); }
+  const real = shopify.admin.graphql;
+  let inFlight = 0;
+  let max = 0;
+  shopify.admin.graphql = async (q, o) => {
+    if (!/OneOrder/.test(q)) return real(q, o);
+    inFlight++; max = Math.max(max, inFlight);
+    await new Promise((r) => setTimeout(r, 5));
+    try { return await real(q, o); } finally { inFlight--; }
+  };
+  const audit = await op({ op: 'audit' });
+  assert.equal(audit.duplicateOrders.length, 10);
+  assert.equal(orderLookups(shopify), 10);
+  assert.equal(max, 4);
+});
+
+test('audit line check: more than 50 recipients → the 50 most recent are checked and truncated is true', async () => {
+  assert.equal(svc.DUPLICATE_LINECHECK_MAX, 50);
+  const { op, db, clock, shopify } = await setup();
+  for (let i = 0; i < 51; i++) {
+    await trackedParcel(db, `5${String(i).padStart(3, '0')}`, `T${i}-1`);
+    await trackedParcel(db, `5${String(i).padStart(3, '0')}`, `T${i}-2`);
+    clock.advance(1);
+  }
+  shopify.calls.length = 0;
+  const audit = await op({ op: 'audit' });
+  assert.equal(audit.truncated, true);
+  assert.equal(orderLookups(shopify), 50);
+  assert.equal(audit.duplicateOrders.length, 50);
+  assert.ok(!audit.duplicateOrders.some((d) => d.orderId === '5000'), 'the oldest recipient was the one left out');
+});
+
+// ---------- Stale signed creates (Operations releases a pending parcel after 7 minutes) ----------
+
+test('route: a create signed more than 60 s ago is refused 409 stale_request before the claim; other ops keep 300 s', async () => {
+  const { CREATE_MAX_AGE_SECONDS } = await import('../parcel-auth.js');
+  assert.equal(CREATE_MAX_AGE_SECONDS, 60);
+  const { shopify, dhl, db } = await setup();
+  globalThis.__multishipTestShopify = { [SHOP]: shopify.admin };
+  const at = (body, ageSeconds) => {
+    const raw = JSON.stringify(body);
+    const ts = String(Math.floor(Date.now() / 1000) - ageSeconds);
+    return new Request('https://multiship.example/internal/parcels', {
+      method: 'POST', body: raw,
+      headers: { 'Content-Type': 'application/json', 'X-Siluet-Timestamp': ts, 'X-Siluet-Signature': signParcelRequest('k1', ts, raw) },
+    });
+  };
+  try {
+    await withRoute({ OPERATIONS_SERVICE_KEY: 'k1', PARCEL_SHOPS: SHOP }, async (route) => {
+      // Live DHL settings are not configured here, so a fresh create stops at the lock (423), still before DHL.
+      let res = await route.action({ request: at({ ...createBody(), shop: SHOP }, 61) });
+      assert.equal(res.status, 409);
+      assert.deepEqual(await res.json(), { error: 'stale_request', code: 'stale_request' });
+      assert.equal(dhl.calls.length, 0);
+      assert.equal(db.parcel.rows.size, 0);
+
+      res = await route.action({ request: at({ ...createBody(), shop: SHOP }, 59) });
+      assert.notEqual((await res.json()).code, 'stale_request');
+      assert.equal(res.status, 423); // accepted by the age check; refused only because test-mode labels are locked
+
+      for (const body of [{ op: 'status', parcelId: 'PCL-9' }, { op: 'plan', orderId: '1001' }, { op: 'audit' }]) {
+        res = await route.action({ request: at({ ...body, shop: SHOP }, 299) });
+        assert.notEqual((await res.json()).code, 'stale_request', body.op);
+      }
+      res = await route.action({ request: at({ op: 'audit', shop: SHOP }, 301) });
+      assert.equal((await res.json()).code, 'stale_request'); // the 300 s window still applies to every op (401)
+      assert.equal(res.status, 401);
+    });
+  } finally {
+    delete globalThis.__multishipTestShopify;
+  }
+});
+
+test('stale create check, service side: a 59 s old create books normally, a 61 s old one is never claimed', async () => {
+  const { isStaleCreate } = await import('../parcel-auth.js');
+  const now = 1_800_000_000_000;
+  assert.equal(isStaleCreate(String(now / 1000 - 59), now), false);
+  assert.equal(isStaleCreate(String(now / 1000 - 60), now), false);
+  assert.equal(isStaleCreate(String(now / 1000 - 61), now), true);
+  const { op, dhl } = await setup();
+  assert.equal((await op(createBody())).status, 'fulfilled'); // unlocked path unaffected
+  assert.equal(dhl.calls.length, 1);
+});
+
+
+test('route: on an unlocked shop (dev store) a 61 s old create never reaches DHL, a 59 s old one books', async () => {
+  const DEV = 'siluet-multiship-test.myshopify.com'; // the only shop isLocked() leaves unlocked in test mode
+  const { shopify, db, dhl } = await setup();
+  globalThis.__multishipTestShopify = { [DEV]: shopify.admin };
+  // Distinct fake credentials: dhlFor() caches one client per credential set, and a client keeps the fetch it was
+  // created with, so reusing the rates test's fake credentials would reuse its fake /rates endpoint.
+  db.shopSetting.row = { shop: DEV, data: JSON.stringify({ dhl: { env: 'test', apiKey: 'fake-key-create', apiSecret: 'fake-secret', accountNumber: '000000001' }, sender: { phone: '+971000000000', contactName: 'Test Packer' } }) };
+  const dhlRequests = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    assert.match(String(url), /^https:\/\/express\.api\.dhl\.com\/mydhlapi\/test\/shipments$/); // DHL test endpoint only
+    const body = JSON.parse(init.body);
+    dhlRequests.push(body);
+    return new Response(JSON.stringify({
+      shipmentTrackingNumber: '900000555',
+      packages: body.content.packages.map((_, i) => ({ referenceNumber: i + 1, trackingNumber: `JD0555${i}` })),
+      documents: [{ typeCode: 'label', imageFormat: 'PDF', content: dhl.label }],
+    }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+  };
+  const at = (body, ageSeconds) => {
+    const raw = JSON.stringify(body);
+    const ts = String(Math.floor(Date.now() / 1000) - ageSeconds);
+    return new Request('https://multiship.example/internal/parcels', {
+      method: 'POST', body: raw,
+      headers: { 'Content-Type': 'application/json', 'X-Siluet-Timestamp': ts, 'X-Siluet-Signature': signParcelRequest('k1', ts, raw) },
+    });
+  };
+  try {
+    await withRoute({ OPERATIONS_SERVICE_KEY: 'k1', PARCEL_SHOPS: DEV }, async (route) => {
+      let res = await route.action({ request: at({ ...createBody(), shop: DEV }, 61) });
+      assert.equal(res.status, 409);
+      assert.deepEqual(await res.json(), { error: 'stale_request', code: 'stale_request' });
+      assert.equal(dhlRequests.length, 0);
+      assert.equal(db.parcel.rows.size, 0);
+
+      res = await route.action({ request: at({ ...createBody(), shop: DEV }, 59) });
+      assert.equal(res.status, 200);
+      const out = await res.json();
+      assert.equal(out.trackingNumber, '900000555');
+      assert.equal(dhlRequests.length, 1);
+      assert.equal(db.parcel.rows.size, 1);
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+    delete globalThis.__multishipTestShopify;
+  }
 });

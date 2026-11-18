@@ -59,7 +59,7 @@ Operations (the packing app) books one DHL shipment per packed parcel through Mu
 
 **Shops.** Only shops listed in `PARCEL_SHOPS` (comma separated, e.g. the live `….myshopify.com`) are served. Unset or empty means **no shop** (503 `shops_not_configured`): Multiship has no production shop recorded in its settings to fall back on, so it fails closed. The dev store is served only if listed.
 
-**Signing.** Headers `X-Siluet-Timestamp` (unix seconds) and `X-Siluet-Signature` = lowercase hex HMAC-SHA256, key = UTF-8 of the env var `OPERATIONS_SERVICE_KEY`, over the string `${timestamp}.${rawBody}`. Requests more than 300 s from the server clock are refused. Without `OPERATIONS_SERVICE_KEY` every request gets 503 (fail closed). Set the same value on Render (Multiship) and in Operations; never commit it. Leading and trailing whitespace in the key is ignored on both sides. Bodies above 256 KB (bytes) are refused with 413.
+**Signing.** Headers `X-Siluet-Timestamp` (unix seconds) and `X-Siluet-Signature` = lowercase hex HMAC-SHA256, key = UTF-8 of the env var `OPERATIONS_SERVICE_KEY`, over the string `${timestamp}.${rawBody}`. Requests more than 300 s from the server clock are refused. A `create` signed more than 60 s ago (`CREATE_MAX_AGE_SECONDS` in `app/multiship/parcel-auth.js`) is refused with 409 `{error: "stale_request", code: "stale_request"}` before the claim and before any DHL call, because Operations releases a pending parcel after 7 minutes; Operations treats it as a refusal before booking and makes a new attempt. All other ops keep the 300 s window. Without `OPERATIONS_SERVICE_KEY` every request gets 503 (fail closed). Set the same value on Render (Multiship) and in Operations; never commit it. Leading and trailing whitespace in the key is ignored on both sides. Bodies above 256 KB (bytes) are refused with 413.
 
 **Certified data.** The parcel path builds its DHL request with the same `buildShipmentRequest` that DHL certified. Only the pieces (packed by Operations, with the customs line gross weights scaled so they add up exactly to the pieces, at least 0.001 kg per line), the references (shipment = `parcelId`, packages = `parcelId-1..N`, searchable in MyDHL), the invoice image and the commercial invoice number change.
 
@@ -90,3 +90,29 @@ Operations (the packing app) books one DHL shipment per packed parcel through Mu
 * `app/multiship/scripts/parcel-sandbox-shipment.js` books one two-piece test shipment to the UK (Paperless Trade) and saves the documents.
 
 **Tests.** `npm test` (fakes only; no DHL, Shopify or database calls).
+
+### Plan and audit additions (M5, Nov 2026)
+
+All new fields are additive. Operations treats every one of them as optional, so an older Multiship without them still works with the current Operations.
+
+**`plan`: per recipient**
+* `dhlCity` (string or `null`): the city the shipment builder sends to DHL. For UAE addresses this is the emirate (`uaeCity`, e.g. `"Dubai"` for a Shopify city of `"Business Bay"`); elsewhere it equals `city`. `null` when a UAE address names no emirate (create then refuses it with `bad_address`; fix the address in Shopify). Use it for `rates`. `city` is still the raw Shopify value.
+* `supported` (boolean) and, only when `false`, `reason` (string, e.g. `"No customs data for SKU LB-ST-DUBAI"`). A recipient with a City Lights or unknown SKU has no HS code or declared weight, and none is invented: `plan` lists it with its lines, and `create` for it answers 422 `unsupported_recipient` before any DHL call. Those parcels are booked by hand in MyDHL.
+
+**`plan`: per line** `unitPrice` (decimal string, e.g. `"165.00"`, from Shopify `originalUnitPriceSet.shopMoney.amount`, the same price `create` declares to customs) and `currency` (e.g. `"USD"`). Operations can sum `unitPrice × quantity` as the declared value for an international quote. How `create` computes customs values is unchanged.
+
+**`audit`: `duplicateOrders`** lists recipients whose items are covered by more than one live DHL shipment in the last 90 days:
+
+```json
+{"orderId": "1001", "recipientId": "r1", "trackingNumbers": ["900000001", "5550001111"],
+ "parcelIds": ["PCL-1"], "legacyShipmentIds": ["clx..."], "reason": "legacy_and_parcel"}
+```
+
+* Live shipments are parcels in `label_created` or `fulfilled`, plus legacy batch `Shipment` rows whose tracking number no parcel owns. Rejected parcels are left out (a late label after a reject is already in `alerts`), and the same tracking number seen twice counts once.
+* `reason` is one of four values:
+  * `legacy_and_parcel`: a legacy label and a parcel label for the same recipient.
+  * `several_legacy_labels`: more than one legacy label.
+  * `line_over_covered`: the parcels together claim more of an order line than the order has. This is checked against the Shopify order, and only for recipients with more than one parcel label; several parcels for one recipient are normal. To keep `audit` fast, this Shopify check runs only for recipients with a parcel created in the last 7 days (`DUPLICATE_LINECHECK_RECENT_MS`), at most 4 lookups at a time, and for at most the 50 most recent recipients. When more were waiting, the audit response carries `"truncated": true` (absent otherwise). `legacy_and_parcel` and `several_legacy_labels` need no Shopify call and still cover the full 90 days.
+  * `line_check_failed`: that Shopify check could not run.
+* The admin voids the extra shipment in MyDHL.
+* The existing audit fields (`redacted`, `alerts`, `needsReconciliation`) are unchanged. `truncated` (boolean, only present when `true`) is the one other new top-level field.

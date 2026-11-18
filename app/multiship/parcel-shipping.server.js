@@ -16,7 +16,8 @@
 import crypto from "node:crypto";
 import { PDFDocument } from "pdf-lib";
 import db from "../db.server";
-import { buildShipmentRequest, customsMode, getOrder, planForOrder } from "./shipments.server.js";
+import { buildShipmentRequest, customsMode, getOrder, planForOrder, uaeCity } from "./shipments.server.js";
+import { itemKeyFromSku } from "./src/config.js";
 import { pickupDay } from "./settings.server.js";
 import { SHIPMENT_TIMEOUT_MS } from "./src/dhl.js";
 
@@ -30,6 +31,10 @@ export function noShipmentMinAgeMs(env = process.env) {
 }
 export const RETENTION_MS = 90 * 24 * 3600 * 1000;
 export const ALERT_WINDOW_MS = 30 * 24 * 3600 * 1000;
+export const DUPLICATE_WINDOW_MS = 90 * 24 * 3600 * 1000;
+export const DUPLICATE_LINECHECK_RECENT_MS = 7 * 24 * 3600 * 1000; // Shopify line check only for recent parcels
+export const DUPLICATE_LINECHECK_CONCURRENCY = 4;
+export const DUPLICATE_LINECHECK_MAX = 50;
 const ACTIVE = ["pending", "needs_reconciliation", "label_created"];
 // Parcels whose items count against a Shopify snapshot: active ones, and fulfilled ones the snapshot predates
 // (their tracking number is not yet on a fulfilment in that snapshot).
@@ -356,12 +361,32 @@ async function findOwn(ctx, parcelId) {
 
 // ---------- Ops ----------
 
+/** City DHL gets for this address: the emirate for UAE addresses (uaeCity, as the shipment builder does), else the city. */
+function dhlCityOf(address) {
+  if (address.countryCode !== "AE") return address.city;
+  try { return uaeCity(address); } catch { return null; } // create will refuse it (bad_address)
+}
+
+/**
+ * Why a recipient cannot ship through the parcel service: a line whose SKU has no customs data (City Lights,
+ * unknown SKUs). Nothing is invented for such lines. null when every shipping line is supported.
+ */
+function unsupportedReason(plan, order, recipientId) {
+  const mine = order.lineItems.nodes.filter((l) => l.requiresShipping && l.quantity > 0 &&
+    (plan.type === "single" || l.customAttributes?.some((a) => a.key === "_recipient" && a.value === recipientId)));
+  for (const l of mine) {
+    try { itemKeyFromSku(l.sku); } catch { return `No customs data for SKU ${l.sku || "(none)"}`; }
+  }
+  if (plan.type === "single" && !plan.quotes[recipientId]?.internal?.parcels) return "No customs data for this order";
+  return null;
+}
+
 export async function planOrder(ctx, input) {
   const orderId = legacyOrderId(input.orderId);
   const admin = await ctx.getAdmin();
   const order = await getOrder(admin, orderId);
   if (!order) throw new ParcelError("not_found", "Order not found", 404);
-  const plan = await planForOrder(ctx.shop, order).catch((e) => { throw new ParcelError("unsupported_order", e.message, 422); });
+  const plan = await planForOrder(ctx.shop, order, { allowUnsupported: true }).catch((e) => { throw new ParcelError("unsupported_order", e.message, 422); });
   const state = await fulfilmentState(admin, orderId);
   const held = await reserved(ctx.shop, orderId, state);
   const byId = Object.fromEntries(order.lineItems.nodes.map((l) => [l.id, l]));
@@ -369,17 +394,26 @@ export async function planOrder(ctx, input) {
     const q = plan.quotes[r.id];
     const mine = state.items.filter((it) => ownerOf(plan, it) === r.id);
     const remaining = remainingByLine(mine);
+    const reason = unsupportedReason(plan, order, r.id);
     return {
       recipientId: r.id,
       name: r.address.name,
       city: r.address.city,
+      dhlCity: dhlCityOf(r.address),
       countryCode: r.address.countryCode,
       productCode: q.internal.productCode,
       ddp: q.internal.productCode !== "N" && Boolean(plan.ddpChoices?.[r.id] && q.ddp?.available),
-      lines: Object.entries(remaining).map(([lineItemId, n]) => ({
-        lineItemId, sku: byId[lineItemId]?.sku || "", title: byId[lineItemId]?.title || "",
-        quantity: byId[lineItemId]?.quantity || 0, remainingQuantity: Math.max(0, n - (held[lineItemId] || 0)),
-      })),
+      supported: !reason,
+      ...(reason ? { reason } : {}),
+      lines: Object.entries(remaining).map(([lineItemId, n]) => {
+        const li = byId[lineItemId];
+        const money = li?.originalUnitPriceSet?.shopMoney;
+        return {
+          lineItemId, sku: li?.sku || "", title: li?.title || "",
+          quantity: li?.quantity || 0, remainingQuantity: Math.max(0, n - (held[lineItemId] || 0)),
+          unitPrice: money ? String(money.amount) : null, currency: money?.currencyCode || null,
+        };
+      }),
     };
   });
   const parcels = await db.parcel.findMany({ where: { shop: ctx.shop, orderId } });
@@ -485,10 +519,12 @@ export async function createParcel(ctx, input) {
   const admin = await ctx.getAdmin();
   const order = await getOrder(admin, c.orderId);
   if (!order) throw new ParcelError("not_found", "Order not found", 404);
-  const plan = await planForOrder(ctx.shop, order).catch((e) => { throw new ParcelError("unsupported_order", e.message, 422); });
+  const plan = await planForOrder(ctx.shop, order, { allowUnsupported: true }).catch((e) => { throw new ParcelError("unsupported_order", e.message, 422); });
   const index = plan.recipients.findIndex((r) => r.id === c.recipientId);
   if (index < 0) throw new ParcelError("unknown_recipient", "This order has no such recipient", 422);
   const recipient = plan.recipients[index];
+  const unsupported = unsupportedReason(plan, order, c.recipientId);
+  if (unsupported) throw new ParcelError("unsupported_recipient", unsupported, 422);
   if (plan.quotes[recipient.id].internal.productCode !== c.productCode) {
     throw new ParcelError("product_mismatch", `This recipient ships with DHL ${plan.quotes[recipient.id].internal.productCode}`, 422);
   }
@@ -646,11 +682,86 @@ export async function auditParcels(ctx) {
   }
   const alerts = await db.parcelAlert.findMany({ where: { shop: ctx.shop, createdAt: { gte: new Date(t.getTime() - ALERT_WINDOW_MS) } }, orderBy: { createdAt: "desc" }, take: 100 });
   const open = await db.parcel.findMany({ where: { shop: ctx.shop, status: "needs_reconciliation" } });
+  const dup = await duplicateOrders(ctx, t);
   return {
     redacted: old.length,
     alerts: alerts.map((a) => ({ id: a.id, parcelId: a.parcelId, type: a.type, detail: a.detail ? JSON.parse(a.detail) : null, createdAt: a.createdAt })),
     needsReconciliation: open.map((p) => ({ parcelId: p.id, orderId: p.orderId, claimedAt: p.claimedAt, error: p.error })),
+    duplicateOrders: dup.list,
+    ...(dup.truncated ? { truncated: true } : {}),
   };
+}
+
+/**
+ * Recipients whose items are covered by more than one live DHL shipment, across Parcel rows (label_created or
+ * fulfilled) and legacy batch Shipment rows (tracking not owned by a parcel), created in the last DUPLICATE_WINDOW_MS.
+ * Rejected parcels are left out (a late label after a reject is already an alert); the same tracking number seen
+ * twice counts once. legacy_and_parcel and several_legacy_labels need no Shopify call and cover the full window.
+ * Several parcels for one recipient are normal (separate parcels), so parcels alone are only flagged when, for some
+ * line, their quantities add up to more than the order line. That needs the Shopify order, so it runs only for
+ * recipients with a parcel created in the last DUPLICATE_LINECHECK_RECENT_MS, at most DUPLICATE_LINECHECK_MAX of them
+ * (most recent first; `truncated` when more were waiting), DUPLICATE_LINECHECK_CONCURRENCY lookups at a time.
+ * reason: legacy_and_parcel | several_legacy_labels | line_over_covered | line_check_failed (Shopify unreachable).
+ */
+async function duplicateOrders(ctx, t) {
+  const since = new Date(t.getTime() - DUPLICATE_WINDOW_MS);
+  const recentSince = t.getTime() - DUPLICATE_LINECHECK_RECENT_MS;
+  const parcels = await db.parcel.findMany({ where: { shop: ctx.shop, status: { in: ["label_created", "fulfilled"] }, trackingNumber: { not: null }, createdAt: { gte: since } } });
+  const shipments = await db.shipment.findMany({ where: { shop: ctx.shop, trackingNumber: { not: null }, createdAt: { gte: since } } });
+  const owned = new Set((await db.parcel.findMany({ where: { shop: ctx.shop, trackingNumber: { not: null } } })).map((p) => p.trackingNumber));
+  const groups = new Map();
+  const group = (orderId, recipientId) => {
+    const k = `${orderId} ${recipientId}`;
+    if (!groups.has(k)) groups.set(k, { orderId, recipientId, parcels: [], legacy: [], reason: null });
+    return groups.get(k);
+  };
+  for (const p of parcels) group(p.orderId, p.recipientId).parcels.push(p);
+  for (const sh of shipments) if (!owned.has(sh.trackingNumber)) group(sh.orderId, sh.recipientId).legacy.push(sh);
+
+  const lineChecks = [];
+  for (const g of groups.values()) {
+    const legacyTracking = new Set(g.legacy.map((x) => x.trackingNumber));
+    const parcelTracking = new Set(g.parcels.map((x) => x.trackingNumber));
+    if (legacyTracking.size && [...parcelTracking].some((tn) => !legacyTracking.has(tn))) g.reason = "legacy_and_parcel";
+    else if (legacyTracking.size > 1) g.reason = "several_legacy_labels";
+    else if (parcelTracking.size > 1) {
+      g.newest = Math.max(...g.parcels.map((p) => new Date(p.createdAt).getTime()));
+      if (g.newest >= recentSince) lineChecks.push(g);
+    }
+  }
+  lineChecks.sort((a, b) => b.newest - a.newest);
+  const truncated = lineChecks.length > DUPLICATE_LINECHECK_MAX;
+  const toCheck = lineChecks.slice(0, DUPLICATE_LINECHECK_MAX);
+
+  if (toCheck.length) {
+    let admin = null;
+    try { admin = await ctx.getAdmin(); } catch { /* every check below reports line_check_failed */ }
+    const checkOne = async (g) => {
+      const claimed = {};
+      for (const p of g.parcels) for (const l of JSON.parse(p.lines)) claimed[l.lineItemId] = (claimed[l.lineItemId] || 0) + l.quantity;
+      try {
+        if (!admin) throw new Error("Shopify unavailable");
+        const order = await getOrder(admin, g.orderId);
+        const ordered = Object.fromEntries((order?.lineItems?.nodes || []).map((l) => [l.id, l.quantity]));
+        if (Object.entries(claimed).some(([id, q]) => q > (ordered[id] ?? 0))) g.reason = "line_over_covered";
+      } catch {
+        g.reason = "line_check_failed";
+      }
+    };
+    let next = 0;
+    const worker = async () => { while (next < toCheck.length) await checkOne(toCheck[next++]); };
+    await Promise.all(Array.from({ length: Math.min(DUPLICATE_LINECHECK_CONCURRENCY, toCheck.length) }, worker));
+  }
+
+  const list = [...groups.values()].filter((g) => g.reason).map((g) => ({
+    orderId: g.orderId,
+    recipientId: g.recipientId,
+    trackingNumbers: [...new Set([...g.parcels, ...g.legacy].map((x) => x.trackingNumber))],
+    parcelIds: g.parcels.map((p) => p.id),
+    legacyShipmentIds: g.legacy.map((x) => x.id),
+    reason: g.reason,
+  }));
+  return { list, truncated };
 }
 
 const OPS = { plan: planOrder, rates: parcelRates, create: createParcel, status: parcelStatus, label: parcelLabel, reconcile: reconcileParcel, audit: auditParcels };
